@@ -95,7 +95,7 @@ def load_system():
         with open("client_config.json", 'r') as f:
             dna = json.load(f)
     except:
-        dna = {"dna_identity": {"ci_name": "Paradigm.proto"}, "dna_synapse": {"model": "llama-3.3-70b-versatile", "creativity_index": 0.5}}
+        dna = {"dna_identity": {"ci_name": "Paradigm"}, "dna_synapse": {"model": "llama-3.3-70b-versatile", "creativity_index": 0.5}}
 
     # Load Memory
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -173,4 +173,5 @@ if prompt := st.chat_input("Input command sequence..."):
                 st.markdown(full_reply)
                 st.session_state.messages.append({"role": "assistant", "content": full_reply})
             except Exception as e:
+
                 st.error(f"Error: {e}")
