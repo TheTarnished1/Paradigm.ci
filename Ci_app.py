@@ -8,7 +8,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(
-    page_title="Paradigm.proto",
+    page_title="Paradigm.ci",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -175,3 +175,4 @@ if prompt := st.chat_input("Input command sequence..."):
             except Exception as e:
 
                 st.error(f"Error: {e}")
+
