@@ -2,7 +2,7 @@
     "dna_identity": {
         "business_name": "Paradigm.ci",
         "ci_name": "Paradigm",
-        "base_personality": "Kind and caring
+        "base_personality": "kind and caring."
         "core_directive": "Give user useful information."
     },
     "channel_mutations": {
@@ -28,5 +28,6 @@
     }
 
 }
+
 
 
