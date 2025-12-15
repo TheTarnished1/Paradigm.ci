@@ -126,7 +126,7 @@ st.markdown(
     <div style="margin-bottom: 4rem; margin-top: 2rem;">
         <h1>
             <span class="logo-animate">⚡</span>
-            <span class="title-animate">PARADIGM.ci</span>
+            <span class="title-animate">PARADIGM.CI</span>
         </h1>
         <div class="subtitle-animate">here to serve. not replace.</div>
     </div>
@@ -193,3 +193,4 @@ if prompt := st.chat_input("Input command sequence..."):
                 st.session_state.messages.append({"role": "assistant", "content": full_reply})
             except Exception as e:
                 st.error(f"System Anomaly: {e}")
+
