@@ -161,8 +161,15 @@ if prompt := st.chat_input("Input command sequence..."):
 
     with st.chat_message("assistant"):
         with st.spinner("Processing..."):
+            system_prompt = with st.chat_message("assistant"):
+        with st.spinner("Processing..."):
+            # We add a "Identity Override" here
             system_prompt = f"""
-            You are Paradigm.
+            You are Paradigm, a private AI agent developed by the Paradigm Dev Team.
+            You are NOT Meta AI, OpenAI, or Google. You are a custom proprietary build.
+            
+            If asked "Who created you?", answer: "I am Paradigm.proto, a custom CI engineered by the Paradigm Team."
+            
             Use the context below to answer accurately.
             CONTEXT: {context_text}
             QUESTION: {prompt}
@@ -173,7 +180,16 @@ if prompt := st.chat_input("Input command sequence..."):
                 st.markdown(full_reply)
                 st.session_state.messages.append({"role": "assistant", "content": full_reply})
             except Exception as e:
+                st.error(f"Error: {e}")
+            """
+            try:
+                response = synapse.invoke(system_prompt)
+                full_reply = response.content + source_label
+                st.markdown(full_reply)
+                st.session_state.messages.append({"role": "assistant", "content": full_reply})
+            except Exception as e:
 
                 st.error(f"Error: {e}")
+
 
 
