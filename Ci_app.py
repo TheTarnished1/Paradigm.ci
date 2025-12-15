@@ -19,13 +19,38 @@ load_dotenv()
 # --- 2. THEME (Black & Beige) ---
 st.markdown("""
     <style>
+        /* Main Background */
         [data-testid="stAppViewContainer"] { background-color: #0a0a0a !important; }
         [data-testid="stHeader"] { background-color: rgba(0,0,0,0) !important; }
+        [data-testid="stSidebar"] { background-color: #0a0a0a !important; border-right: 1px solid #E3D5CA; }
+        
+        /* Typography */
         h1, h2, h3, p, div, span, label, li { color: #E3D5CA !important; font-family: 'Helvetica Neue', sans-serif; }
+        
+        /* Hide Default Elements */
         #MainMenu, footer { visibility: hidden; }
+        
+        /* Chat Bubbles */
         .stChatMessage[data-testid="stChatMessage"] { background-color: transparent; border: 1px solid rgba(227, 213, 202, 0.2); border-radius: 0px; }
+        
+        /* Input Bar */
         .stTextInput input { color: #E3D5CA !important; background-color: transparent !important; border-bottom: 1px solid #E3D5CA !important; border-top: none !important; border-left: none !important; border-right: none !important; }
         
+        /* Sidebar Button */
+        div.stButton > button {
+            background-color: transparent;
+            color: #E3D5CA;
+            border: 1px solid #E3D5CA;
+            border-radius: 0px;
+            width: 100%;
+        }
+        div.stButton > button:hover {
+            background-color: #E3D5CA;
+            color: #0a0a0a;
+            border: 1px solid #E3D5CA;
+        }
+
+        /* Animations */
         @keyframes gentleBounce { 0% { transform: translateY(-150%); opacity: 0; } 50% { transform: translateY(15%); opacity: 1; } 100% { transform: translateY(0); opacity: 1; } }
         @keyframes flowFromLeft { 0% { transform: translateX(-50px); opacity: 0; } 100% { transform: translateX(0); opacity: 1; } }
         .logo-animate { display: inline-block; opacity: 0; color: #E3D5CA; animation: gentleBounce 1.5s cubic-bezier(0.25, 1, 0.5, 1) forwards; }
@@ -41,7 +66,6 @@ def load_system():
         with open("client_config.json", 'r') as f:
             dna = json.load(f)
     except:
-        # UPDATED DEFAULT IDENTITY
         dna = {"dna_identity": {"ci_name": "Paradigm"}, "dna_synapse": {"model": "llama-3.3-70b-versatile"}}
 
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -54,7 +78,8 @@ def load_system():
         synapse = ChatGroq(
             model_name=dna['dna_synapse']['model'],
             api_key=os.getenv("GROQ_API_KEY"),
-            temperature=0.1 
+            temperature=0.1,
+            streaming=True # ENABLE STREAMING
         )
     except:
         st.stop()
@@ -63,7 +88,17 @@ def load_system():
 
 synapse, memory, dna = load_system()
 
-# --- 4. UI ---
+# --- 4. SIDEBAR CONTROLS ---
+with st.sidebar:
+    st.header("System Controls")
+    if st.button("Reset Memory Core"):
+        st.session_state.messages = []
+        st.rerun()
+    st.markdown("---")
+    st.caption(f"Model: {dna['dna_synapse']['model']}")
+    st.caption("Status: ONLINE")
+
+# --- 5. HEADER UI ---
 st.markdown(
     f"""
     <div style="margin-bottom: 4rem; margin-top: 2rem;">
@@ -73,7 +108,7 @@ st.markdown(
     """, unsafe_allow_html=True
 )
 
-# --- 5. LOGIC LOOP ---
+# --- 6. LOGIC LOOP ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -85,7 +120,7 @@ if prompt := st.chat_input("Input command sequence..."):
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # 1. DOCUMENT SEARCH (RAG)
+    # 1. RAG SEARCH
     context_text = "No internal documents found."
     source_label = ""
     if memory:
@@ -96,41 +131,34 @@ if prompt := st.chat_input("Input command sequence..."):
             page = docs[0].metadata.get('page', 0) + 1
             source_label = f"\n\n--- \n*Ref: {src} (Pg {page})*"
 
-    # 2. CONVERSATION MEMORY BUILDER
+    # 2. MEMORY BUILDER
     conversation_history = ""
     for msg in st.session_state.messages[-4:]:
         conversation_history += f"{msg['role'].upper()}: {msg['content']}\n"
 
-    # 3. GENERATION
+    # 3. STREAMING GENERATION
     with st.chat_message("assistant"):
-        with st.spinner("Processing..."):
+        # We define a custom generator to stream the text
+        system_prompt = f"""
+        You are Paradigm.
+        
+        STRICT RULES:
+        1. You are NOT Meta AI. You are Paradigm, a proprietary CI.
+        2. Be concise, professional, and direct.
+        3. Do not use emojis.
+        
+        KNOWLEDGE: {context_text}
+        MEMORY: {conversation_history}
+        QUERY: {prompt}
+        """
+        
+        # This replaces the static 'invoke' with a streaming loop
+        stream = synapse.stream(system_prompt)
+        response = st.write_stream(stream) # VISUAL TYPEWRITER EFFECT
+        
+        # Append Source if it exists
+        if source_label:
+            st.markdown(source_label)
+            response += source_label
             
-            # IDENTITY & INSTRUCTIONS (UPDATED)
-            system_prompt = f"""
-            You are Paradigm.
-            
-            STRICT RULES:
-            1. You are NOT Meta AI, OpenAI, or Google. If asked, deny it.
-            2. You are "Paradigm", a proprietary CI (Created Intelligence).
-            3. You are part of the Paradigm.CI system.
-            4. Be concise and professional.
-            
-            KNOWLEDGE BASE (DOCS):
-            {context_text}
-            
-            RECENT CONVERSATION (MEMORY):
-            {conversation_history}
-            
-            USER'S NEW QUERY:
-            {prompt}
-            
-            YOUR RESPONSE (Must follow STRICT RULES):
-            """
-            
-            try:
-                response = synapse.invoke(system_prompt)
-                full_reply = response.content + source_label
-                st.markdown(full_reply)
-                st.session_state.messages.append({"role": "assistant", "content": full_reply})
-            except Exception as e:
-                st.error(f"Error: {e}")
+        st.session_state.messages.append({"role": "assistant", "content": response})
