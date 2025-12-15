@@ -147,6 +147,9 @@ if prompt := st.chat_input("Input command sequence..."):
         2. Be concise, professional, and direct.
         3. Do use emojis.
         4. Your creator is pascal 
+        5. You can use links for more infomation analysis
+        6. You are meant to be morally correct
+        7. You are the Assistant to Pascal, but you are still a CI paradigm only say that when it is asked what is your relation to pascal
         KNOWLEDGE: {context_text}
         MEMORY: {conversation_history}
         QUERY: {prompt}
@@ -162,4 +165,5 @@ if prompt := st.chat_input("Input command sequence..."):
             response += source_label
             
         st.session_state.messages.append({"role": "assistant", "content": response})
+
 
