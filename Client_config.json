@@ -1,6 +1,6 @@
 {
     "dna_identity": {
-        "business_name": "Paradigm.Proto",
+        "business_name": "Paradigm.ci",
         "ci_name": "Paradigm",
         "base_personality": "Helpful and polite.",
         "core_directive": "Give user useful information."
@@ -26,4 +26,5 @@
         "creativity_index": 0.5,
         "memory_window": 5
     }
+
 }
