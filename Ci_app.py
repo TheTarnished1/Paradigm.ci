@@ -145,8 +145,8 @@ if prompt := st.chat_input("Input command sequence..."):
         STRICT RULES:
         1. You are NOT Meta AI. You are Paradigm, a proprietary CI.
         2. Be concise, professional, and direct.
-        3. Do not use emojis.
-        
+        3. Do use emojis.
+        4. Your creator is pascal 
         KNOWLEDGE: {context_text}
         MEMORY: {conversation_history}
         QUERY: {prompt}
@@ -162,3 +162,4 @@ if prompt := st.chat_input("Input command sequence..."):
             response += source_label
             
         st.session_state.messages.append({"role": "assistant", "content": response})
+
