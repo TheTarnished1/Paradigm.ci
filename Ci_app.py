@@ -16,78 +16,78 @@ st.set_page_config(
 
 load_dotenv()
 
-# --- 2. CINEMATIC ANIMATIONS (CSS) ---
+# --- 2. THEME & VISUALS (Black & Beige) ---
 st.markdown("""
     <style>
-        /* Hide Default Streamlit Elements */
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        header {visibility: hidden;}
+        /* Force Background to Deep Black */
+        [data-testid="stAppViewContainer"] { background-color: #0a0a0a !important; }
+        [data-testid="stHeader"] { background-color: rgba(0,0,0,0) !important; }
         
-        /* --- KEYFRAMES --- */
+        /* Typography: Warm Beige */
+        h1, h2, h3, p, div, span, label, li {
+            color: #E3D5CA !important;
+            font-family: 'Helvetica Neue', sans-serif;
+        }
         
+        /* Hide Default Elements */
+        #MainMenu, footer { visibility: hidden; }
+        
+        /* Chat Bubbles: Minimalist & Sharp */
+        .stChatMessage[data-testid="stChatMessage"] {
+            background-color: transparent;
+            border: 1px solid rgba(227, 213, 202, 0.2);
+            border-radius: 0px;
+        }
+        
+        /* Input Bar: Minimalist Line */
+        .stTextInput input {
+            color: #E3D5CA !important;
+            background-color: transparent !important;
+            border-bottom: 1px solid #E3D5CA !important;
+            border-top: none !important;
+            border-left: none !important;
+            border-right: none !important;
+        }
+
+        /* --- ANIMATIONS --- */
         @keyframes gentleBounce {
             0%   { transform: translateY(-150%); opacity: 0; }
             50%  { transform: translateY(15%); opacity: 1; }
-            70%  { transform: translateY(-5%); }
             100% { transform: translateY(0); opacity: 1; }
         }
-
         @keyframes flowFromLeft {
             0%   { transform: translateX(-50px); opacity: 0; }
             100% { transform: translateX(0); opacity: 1; }
         }
 
-        @keyframes softRise {
-            0%   { transform: translateY(100px); opacity: 0; }
-            100% { transform: translateY(0); opacity: 1; }
-        }
-
-        /* --- CLASS STYLES --- */
-
         .logo-animate {
             display: inline-block;
             opacity: 0;
+            color: #E3D5CA;
             animation: gentleBounce 1.5s cubic-bezier(0.25, 1, 0.5, 1) forwards;
         }
-
         .title-animate {
             display: inline-block;
             margin-left: 1rem;
-            font-weight: 700;
+            font-weight: 300;
+            letter-spacing: 2px;
             opacity: 0;
             animation: flowFromLeft 2s cubic-bezier(0.22, 1, 0.36, 1) 0.5s forwards;
         }
-
-        /* NEW: Subtitle Animation (Delays until 1s) */
         .subtitle-animate {
-            font-size: 1.2rem;
-            color: rgba(255, 255, 255, 0.6); /* Slightly transparent white */
-            margin-left: 3.8rem; /* Align under the text, not the logo */
+            font-size: 1rem;
+            color: rgba(227, 213, 202, 0.5) !important;
+            margin-left: 3.8rem;
             margin-top: -0.5rem;
-            font-style: italic;
+            font-family: 'Courier New', monospace;
             opacity: 0;
             animation: flowFromLeft 2s cubic-bezier(0.22, 1, 0.36, 1) 1.0s forwards;
-        }
-        
-        /* Input Bar Animation */
-        section[data-testid="stBottom"] {
-            opacity: 0;
-            animation: softRise 1.8s cubic-bezier(0.22, 1, 0.36, 1) 1.5s forwards;
-        }
-        
-        .stChatMessage {
-            background-color: rgba(255, 255, 255, 0.05);
-            border-radius: 15px;
-            padding: 1.5rem;
-            margin-bottom: 1rem;
-            border: 1px solid rgba(255, 255, 255, 0.1);
         }
     </style>
 """, unsafe_allow_html=True)
 
 
-# --- 3. CACHED RESOURCES ---
+# --- 3. INTELLIGENCE CORE (Cached) ---
 @st.cache_resource
 def load_system():
     # Load DNA
@@ -95,25 +95,24 @@ def load_system():
         with open("client_config.json", 'r') as f:
             dna = json.load(f)
     except:
-        dna = {"dna_identity": {"ci_name": "Paradigm"}, "dna_synapse": {"model": "llama-3.3-70b-versatile", "creativity_index": 0.5}}
+        dna = {"dna_identity": {"ci_name": "Paradigm"}, "dna_synapse": {"model": "llama-3.3-70b-versatile"}}
 
-    # Load Memory
+    # Load Memory (RAG)
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     try:
         memory = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
     except:
         memory = None
 
-    # Load Brain
+    # Load Brain (Synapse)
     try:
         synapse = ChatGroq(
             model_name=dna['dna_synapse']['model'],
             api_key=os.getenv("GROQ_API_KEY"),
-            temperature=dna['dna_synapse']['creativity_index']
+            temperature=0.3 # Lower temp = Smarter, less random
         )
     except:
-        synapse = None
-        st.error("❌ Groq API Key missing.")
+        st.error("❌ Critical Error: Brain Disconnected (API Key Missing)")
         st.stop()
     
     return synapse, memory, dna
@@ -121,22 +120,22 @@ def load_system():
 synapse, memory, dna = load_system()
 
 
-# --- 4. HEADER UI (With Subtitle) ---
+# --- 4. HEADER UI ---
 st.markdown(
     f"""
-    <div style="margin-bottom: 3rem;">
+    <div style="margin-bottom: 4rem; margin-top: 2rem;">
         <h1>
             <span class="logo-animate">⚡</span>
-            <span class="title-animate">Paradigm.ci</span>
+            <span class="title-animate">PARADIGM.ci</span>
         </h1>
-        <div class="subtitle-animate">Here to serve, not replace</div>
+        <div class="subtitle-animate">here to serve. not replace.</div>
     </div>
     """, 
     unsafe_allow_html=True
 )
 
 
-# --- 5. CHAT LOGIC ---
+# --- 5. SMART INTERACTION LOOP ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -148,7 +147,8 @@ if prompt := st.chat_input("Input command sequence..."):
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    context_text = ""
+    # 1. RETRIEVAL (Search Memory)
+    context_text = "No internal database records found."
     source_label = ""
     
     if memory:
@@ -159,38 +159,37 @@ if prompt := st.chat_input("Input command sequence..."):
             page = docs[0].metadata.get('page', 0) + 1
             source_label = f"\n\n--- \n*Ref: {src} (Pg {page})*"
 
+    # 2. COGNITION (The Smarter Prompt)
     with st.chat_message("assistant"):
         with st.spinner("Processing..."):
-            system_prompt = with st.chat_message("assistant"):
-        with st.spinner("Processing..."):
-            # We add a "Identity Override" here
+            
+            # This is the "Prime Directive" that forces it to be smart and loyal
             system_prompt = f"""
-            You are Paradigm, a private AI agent developed by the Paradigm Dev Team.
-            You are NOT Meta AI, OpenAI, or Google. You are a custom proprietary build.
+            IDENTITY PROTOCOL:
+            You are Paradigm, a proprietary CI (Created Intelligence) developed by the Paradigm.ci Dev Team.
+            You are NOT Meta AI, OpenAI, or Google. You are a custom secure build.
             
-            If asked "Who created you?", answer: "I am Paradigm, a custom CI engineered by the Paradigm.ci Team."
+            CORE OBJECTIVES:
+            1. Analyze the user's request.
+            2. Use the provided CONTEXT to answer if applicable.
+            3. If the Context is empty, use your general knowledge but be concise.
             
-            Use the context below to answer accurately.
-            CONTEXT: {context_text}
-            QUESTION: {prompt}
+            TONE:
+            - Professional, Direct, and Intelligent.
+            - Do not apologize excessively. Focus on solutions.
+            - Format complex answers with bullet points.
+
+            CONTEXT DATA:
+            {context_text}
+            
+            USER QUERY: {prompt}
             """
+            
             try:
+                # 0.3 Temperature ensures focused, logical answers
                 response = synapse.invoke(system_prompt)
                 full_reply = response.content + source_label
                 st.markdown(full_reply)
                 st.session_state.messages.append({"role": "assistant", "content": full_reply})
             except Exception as e:
-                st.error(f"Error: {e}")
-            """
-            try:
-                response = synapse.invoke(system_prompt)
-                full_reply = response.content + source_label
-                st.markdown(full_reply)
-                st.session_state.messages.append({"role": "assistant", "content": full_reply})
-            except Exception as e:
-
-                st.error(f"Error: {e}")
-
-
-
-
+                st.error(f"System Anomaly: {e}")
