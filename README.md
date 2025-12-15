@@ -75,7 +75,7 @@ python slack_bot.py
 You should see: CI Teammate is online and listening to Slack...
 
 Step 3: Chat in Slack
-Mention: @LogiBot Help me with...
+Mention: @Bot Help me with...
 
 DM: Send a direct message to the bot.
 
@@ -89,4 +89,5 @@ client_config.json - The personality settings.
 docs/ - Place your PDF training files here.
 
 faiss_index/ - The database created by the setup tool (do not edit manually).
+
 
