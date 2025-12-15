@@ -127,7 +127,7 @@ st.markdown(
     <div style="margin-bottom: 3rem;">
         <h1>
             <span class="logo-animate">⚡</span>
-            <span class="title-animate">Paradigm.proto</span>
+            <span class="title-animate">Paradigm.ci</span>
         </h1>
         <div class="subtitle-animate">Here to serve, not replace</div>
     </div>
@@ -162,7 +162,7 @@ if prompt := st.chat_input("Input command sequence..."):
     with st.chat_message("assistant"):
         with st.spinner("Processing..."):
             system_prompt = f"""
-            You are Paradigm.proto.
+            You are Paradigm.
             Use the context below to answer accurately.
             CONTEXT: {context_text}
             QUESTION: {prompt}
@@ -175,4 +175,5 @@ if prompt := st.chat_input("Input command sequence..."):
             except Exception as e:
 
                 st.error(f"Error: {e}")
+
 
