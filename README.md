@@ -59,19 +59,19 @@ JSON
         "base_personality": "Professional, Concise, Safety-Focused"
     },
     "dna_synapse": {
-        "model": "llama-3.3-70b-versatile"
+        "model": "openai/gpt-oss-120b"
     }
  How to Run
 Step 1: Build the Memory (Optional)
 If you have PDFs in the docs/ folder, run this once to teach the AI:
 
-python setup_tools.py
+python ci_setup_tools.py
 Step 2: Start the Bot
 Run the main engine:
 
 Bash
 
-python slack_bot.py
+python ci_engine.py
 You should see: CI Teammate is online and listening to Slack...
 
 Step 3: Chat in Slack
@@ -80,9 +80,9 @@ Mention: @Bot Help me with...
 DM: Send a direct message to the bot.
 
  Project Structure
-slack_bot.py - The main engine (Connects Slack + AI).
+ci_engine.py - The main engine (Connects Slack + AI).
 
-setup_tools.py - The builder (Reads PDFs and creates the memory).
+ci_setup_tools.py - The builder (Reads PDFs and creates the memory).
 
 client_config.json - The personality settings.
 

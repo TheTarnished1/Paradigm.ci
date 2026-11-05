@@ -6,3 +6,6 @@ faiss-cpu
 sentence-transformers
 python-dotenv
 huggingface-hub
+slack_bolt
+pypdf
+langchain-text-splitters

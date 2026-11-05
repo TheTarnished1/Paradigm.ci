@@ -1,0 +1,15 @@
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+maxUploadSize = 10
+fileWatcherType = "none"
+
+[theme.light]
+primaryColor = "#C2410C"
+
+[theme.dark]
+primaryColor = "#FB923C"
