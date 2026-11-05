@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -22,7 +23,7 @@ if real_services:
 import streamlit as st
 from langchain_community.vectorstores import FAISS
 from langchain_core.embeddings import DeterministicFakeEmbedding
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from streamlit.testing.v1 import AppTest
 
 import store
@@ -224,6 +225,68 @@ with patch("langchain_groq.ChatGroq", FakeChatGroq):
     conversation = store.list_conversations(bob, "assistant")[0]["id"]
     next(b for b in at.button if b.key == f"delete_{conversation}").click().run()
     assert store.list_conversations(bob, "assistant") == []
+
+    # A user over the limit is told so, and nothing is sent or saved
+    erin, _ = store.create_user("erin", PASSWORD)
+    with patch.dict(store.LIMITS, {"message": [(True, 2, store.MINUTE, "Slow down test")]}):
+        at = login("erin")
+        button(at, "Open General chat").click().run()
+        send(at, "one")
+        send(at, "two")
+        calls_before = len(FakeChatGroq.calls)
+        send(at, "three")
+        assert len(FakeChatGroq.calls) == calls_before, "a blocked message must not reach Groq"
+        assert at.warning and at.warning[0].value == "Slow down test"
+        chat_id = store.list_conversations(erin, "general")[0]["id"]
+        assert "three" not in [m["content"] for m in store.load_messages(erin, chat_id)]
+
+        # Another user isn't affected by erin's limit
+        at = login("bob")
+        button(at, "Open General chat").click().run()
+        send(at, "still fine")
+        assert not at.warning
+
+    # A limit for everyone applies across users
+    with patch.dict(store.LIMITS, {"message": [(False, 1, store.MINUTE, "Everyone limit test")]}):
+        at = login("bob")
+        button(at, "Open General chat").click().run()
+        send(at, "blocked")
+        assert at.warning and at.warning[0].value == "Everyone limit test"
+
+    # Sign-ups stop at the limit, and failed attempts don't use it up
+    with patch.dict(store.LIMITS, {"signup": [(False, 1, 3600, "Signup limit test")]}):
+        with store.engine().begin() as db:
+            db.execute(delete(store.usage).where(store.usage.c.kind == "signup"))
+        at = start()
+        field(at, "signup_username").set_value("x")
+        field(at, "signup_password").set_value(PASSWORD)
+        field(at, "signup_confirm").set_value(PASSWORD)
+        button(at, "Create account").click().run()
+        assert at.error and "Signup limit test" not in at.error[0].value, "a bad name isn't counted"
+        field(at, "signup_username").set_value("frank")
+        button(at, "Create account").click().run()
+        assert at.title[0].value == "Welcome, frank"
+        at = start()
+        field(at, "signup_username").set_value("grace")
+        field(at, "signup_password").set_value(PASSWORD)
+        field(at, "signup_confirm").set_value(PASSWORD)
+        button(at, "Create account").click().run()
+        assert at.error[0].value == "Signup limit test"
+        assert store.verify_user("grace", PASSWORD) is None
+
+# Upload limits count per user, and old usage gets cleaned up and stops counting
+with patch.dict(store.LIMITS, {"upload": [(True, 1, store.DAY, "Upload limit test")]}):
+    assert store.limit_message("upload", alice) is None
+    store.record_usage("upload", alice)
+    assert store.limit_message("upload", alice) == "Upload limit test"
+    assert store.limit_message("upload", bob) is None
+    with store.engine().begin() as db:
+        db.execute(update(store.usage).values(at=time.time() - 3 * store.DAY))
+    assert store.limit_message("upload", alice) is None
+    store.record_usage("upload", bob)
+    with store.engine().connect() as db:
+        left = db.execute(select(func.count()).select_from(store.usage)).scalar()
+    assert left == 1, "usage older than two days must be removed"
 
 # --- Uploaded PDFs become searchable, survive saving, and cite the original file name ---
 PDF = b"""%PDF-1.4
