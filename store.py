@@ -1,6 +1,7 @@
 """Accounts, setups, documents and saved chats. Every chat query is scoped to the user who owns it.
 
-Uses Postgres when DATABASE_URL is set, and a local SQLite file otherwise.
+Uses Postgres when DATABASE_URL is set, and a local SQLite file otherwise. Document indexes go to
+Neon object storage when AWS_ENDPOINT_URL_S3 is set, and to the database otherwise.
 """
 import hashlib
 import hmac
@@ -9,6 +10,7 @@ import os
 import re
 import secrets
 import time
+import urllib.request
 import uuid
 from functools import lru_cache
 
@@ -30,13 +32,15 @@ from sqlalchemy import (
     select,
     update,
 )
-from sqlalchemy.exc import IntegrityError
+from botocore.exceptions import BotoCoreError, ClientError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 MAX_FAILED_LOGINS = 5
 LOCK_SECONDS = 300
 MIN_PASSWORD_LENGTH = 8
 MAX_INDEX_BYTES = 30 * 1024 * 1024  # stops one user filling a small free database
 USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_.-]{3,30}")
+BUCKET = "assets"  # declared in neon.ts
 
 metadata = MetaData()
 users = Table(
@@ -98,7 +102,10 @@ def database_url():
 @lru_cache(maxsize=1)
 def engine():
     # pre_ping and recycle: free hosted databases sleep and drop idle connections
-    db_engine = create_engine(database_url(), pool_pre_ping=True, pool_recycle=300)
+    url = database_url()
+    # Neon's pooled connections run through PgBouncer, so psycopg's prepared statements stay off
+    connect_args = {"prepare_threshold": None} if url.startswith("postgresql") else {}
+    db_engine = create_engine(url, pool_pre_ping=True, pool_recycle=300, connect_args=connect_args)
     if db_engine.dialect.name == "sqlite":
         event.listen(
             db_engine,
@@ -180,8 +187,57 @@ def save_setup(user_id, identity, doc_names):
         )
 
 
+def _bucket():
+    """Returns an S3 client for Neon object storage, or None to keep documents in the database."""
+    if not os.environ.get("AWS_ENDPOINT_URL_S3"):
+        return None
+    import boto3  # only needed when object storage is configured
+    from botocore.config import Config
+
+    # Credentials, endpoint and region come from the AWS_* variables. Neon needs path-style URLs.
+    return boto3.client("s3", config=Config(s3={"addressing_style": "path"}, signature_version="s3v4"))
+
+
+def _document_key(user_id):
+    return f"documents/{int(user_id)}.faiss"
+
+
+def service_status():
+    """Checks each configured service. Returns {service name: working}."""
+    status = {}
+    try:
+        with engine().connect() as db:
+            db.execute(select(1))
+        status["Database"] = True
+    except SQLAlchemyError:
+        status["Database"] = False
+
+    bucket = _bucket()
+    if bucket:
+        try:
+            bucket.head_bucket(Bucket=BUCKET)
+            status["Document storage"] = True
+        except (BotoCoreError, ClientError):
+            status["Document storage"] = False
+
+    function_url = os.environ.get("NEON_FUNCTION_HELLO_BASE_URL")
+    if function_url:
+        try:
+            with urllib.request.urlopen(function_url, timeout=10) as response:
+                status["Functions"] = response.status == 200
+        except OSError:
+            status["Functions"] = False
+    return status
+
+
 def load_documents(user_id):
     """Returns this user's saved document index as bytes, or None."""
+    bucket = _bucket()
+    if bucket:
+        try:
+            return bucket.get_object(Bucket=BUCKET, Key=_document_key(user_id))["Body"].read()
+        except bucket.exceptions.NoSuchKey:
+            return None
     with engine().connect() as db:
         return db.execute(
             select(documents.c.index_data).where(documents.c.user_id == user_id)
@@ -189,6 +245,10 @@ def load_documents(user_id):
 
 
 def save_documents(user_id, index_data):
+    bucket = _bucket()
+    if bucket:
+        bucket.put_object(Bucket=BUCKET, Key=_document_key(user_id), Body=index_data)
+        return
     with engine().begin() as db:
         db.execute(delete(documents).where(documents.c.user_id == user_id))
         db.execute(insert(documents).values(user_id=user_id, index_data=index_data))

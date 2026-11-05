@@ -92,15 +92,20 @@ faiss_index/ - The database created by the setup tool (do not edit manually).
 
 ## Deploy for free
 
-The web app runs on Streamlit Community Cloud, and accounts and chats live in a free Postgres database. Without `DATABASE_URL`, it uses a local SQLite file, which Streamlit Cloud can wipe on restart.
+The web app runs on Streamlit Community Cloud. Accounts and chats live in Neon Postgres, and document indexes in Neon object storage. Without these settings, the app uses a local SQLite file, which Streamlit Cloud can wipe on restart.
 
-1. Create a free Postgres database, for example on [Neon](https://neon.tech), and copy its connection string.
+1. Run `neon deploy`, which writes the Neon values to `.env.local`.
 2. Create an app on [Streamlit Community Cloud](https://share.streamlit.io) from this repo, with `Ci_app.py` as the main file.
-3. In the app's **Advanced settings → Secrets**, add:
+3. In the app's **Advanced settings → Secrets**, add your `GROQ_API_KEY`, plus these values from `.env.local`:
 
 ```toml
-GROQ_API_KEY = "your-groq-key"
-DATABASE_URL = "your-postgres-connection-string"
+GROQ_API_KEY = "..."
+DATABASE_URL = "..."
+AWS_ACCESS_KEY_ID = "..."
+AWS_SECRET_ACCESS_KEY = "..."
+AWS_ENDPOINT_URL_S3 = "..."
+AWS_REGION = "..."
+NEON_FUNCTION_HELLO_BASE_URL = "..."
 ```
 
 Never commit these values. The tables are created on first run.
@@ -111,4 +116,4 @@ Never commit these values. The tables are created on first run.
 python test_app.py
 ```
 
-To run them against Postgres, set `TEST_DATABASE_URL` to an empty, throwaway database. They create test accounts there.
+To run them against real Neon services, create a throwaway branch, write its variables to a file with `neon env pull --branch <name> --file <path>`, and set `TEST_ENV_FILE` to that path. They create test accounts there, so never point this at production.

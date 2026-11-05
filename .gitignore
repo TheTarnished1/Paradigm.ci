@@ -4,3 +4,7 @@ faiss_index/
 venv/
 data/
 .streamlit/secrets.toml
+.neon
+node_modules/
+.env.local
+.env.test-run

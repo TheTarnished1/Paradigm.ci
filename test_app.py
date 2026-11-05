@@ -10,9 +10,14 @@ from unittest.mock import patch
 data_folder = tempfile.mkdtemp()
 os.environ["GROQ_API_KEY"] = "test-key-not-real"
 os.environ["PARADIGM_DATA"] = data_folder  # keeps test accounts out of the real database
-os.environ.pop("DATABASE_URL", None)
-if os.environ.get("TEST_DATABASE_URL"):  # an empty, throwaway Postgres database
-    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
+# Blank values stop the app loading production settings from .env.local during tests
+for name in ["DATABASE_URL", "AWS_ENDPOINT_URL_S3", "NEON_FUNCTION_HELLO_BASE_URL"]:
+    os.environ[name] = ""
+real_services = os.environ.get("TEST_ENV_FILE")  # variables for an empty, throwaway Neon branch
+if real_services:
+    from dotenv import dotenv_values
+
+    os.environ.update(dotenv_values(real_services))
 
 import streamlit as st
 from langchain_community.vectorstores import FAISS
@@ -285,6 +290,15 @@ with groq_lists("model-b"):
 with patch("urllib.request.urlopen", side_effect=OSError("no network")):
     online, message = model_status("model-a", "key")
     assert online is False and "no network" not in message
+
+# Every configured service answers
+status = store.service_status()
+assert status and all(status.values()), status
+if real_services:
+    assert set(status) == {"Database", "Document storage", "Functions"}, status
+    assert store.engine().dialect.name == "postgresql"
+else:
+    assert set(status) == {"Database"} and store.engine().dialect.name == "sqlite"
 
 shutil.rmtree(data_folder, ignore_errors=True)
 print("ok")

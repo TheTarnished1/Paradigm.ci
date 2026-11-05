@@ -14,6 +14,7 @@ import store
 from ci_setup_tools import EMBEDDING_MODEL, build_index, model_status, read_pdf
 
 st.set_page_config(page_title="Paradigm", page_icon="⚡", layout="centered")
+load_dotenv(".env.local")  # written by `neon deploy`
 load_dotenv()
 
 ASSISTANT = "assistant"
@@ -66,6 +67,11 @@ def prepare_database():
 @st.cache_data(ttl=60, show_spinner="Checking status...")
 def cached_status(model):
     return model_status(model, os.getenv("GROQ_API_KEY"))
+
+
+@st.cache_data(ttl=60, show_spinner="Checking status...")
+def cached_services():
+    return store.service_status()
 
 
 dna = load_dna()
@@ -250,6 +256,8 @@ def status_panel():
     st.markdown(f"**Assistant:** {assistant_name}")
     documents = st.session_state.doc_names
     st.markdown(f"**Documents:** {', '.join(documents) if documents else 'None'}")
+    for service, working in cached_services().items():
+        st.markdown(f"**{service}:** {'Online' if working else 'Offline'}")
     st.caption("Status is checked at most once a minute.")
 
 
