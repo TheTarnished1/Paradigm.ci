@@ -1,0 +1,281 @@
+/* Paradigm: editorial type and heavy rules, with frosted glass on floating surfaces.
+   Keep these colours the same as .streamlit/config.toml. */
+:root {
+  --pd-accent: #C92A10;
+  --pd-bg: #F4EEE1;
+  --pd-surface: #E9E1CF;
+  --pd-text: #111111;
+  --pd-muted: #4F4A42;
+  --pd-line: rgb(17 17 17 / 16%);
+  --pd-glass: rgb(250 246 236 / 58%);
+  --pd-glass-strong: rgb(250 246 236 / 78%);
+  --pd-glass-edge: rgb(255 255 255 / 65%);
+  --pd-glow-1: rgb(201 42 16 / 15%);
+  --pd-glow-2: rgb(214 158 46 / 20%);
+  --pd-shadow: 0 10px 30px rgb(60 40 20 / 10%);
+  --pd-gap-1: 0.25rem;
+  --pd-gap-2: 0.5rem;
+  --pd-gap-3: 1rem;
+  --pd-gap-4: 1.5rem;
+  --pd-radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --pd-accent: #FF6B4A;
+    --pd-bg: #11100E;
+    --pd-surface: #1E1B17;
+    --pd-text: #F4EEE1;
+    --pd-muted: #BDB5A6;
+    --pd-line: rgb(244 238 225 / 18%);
+    --pd-glass: rgb(38 34 29 / 55%);
+    --pd-glass-strong: rgb(38 34 29 / 80%);
+    --pd-glass-edge: rgb(255 255 255 / 10%);
+    --pd-glow-1: rgb(255 107 74 / 13%);
+    --pd-glow-2: rgb(214 158 46 / 9%);
+    --pd-shadow: 0 10px 30px rgb(0 0 0 / 40%);
+  }
+}
+
+/* Soft colour behind everything, which gives the glass something to frost */
+[data-testid="stApp"] {
+  background:
+    radial-gradient(55vmax 55vmax at 92% -8%, var(--pd-glow-1), transparent 62%),
+    radial-gradient(50vmax 50vmax at -6% 104%, var(--pd-glow-2), transparent 62%),
+    var(--pd-bg);
+  background-attachment: fixed;
+}
+[data-testid="stMain"], [data-testid="stBottom"], [data-testid="stBottomBlockContainer"] { background: transparent; }
+[data-testid="stBottom"] > div { background: transparent !important; }
+
+/* Page */
+[data-testid="stHeader"] { background: linear-gradient(var(--pd-bg) 35%, transparent); }
+[data-testid="stMainBlockContainer"] {
+  max-width: 760px;
+  padding: 4rem 1rem 7rem;
+}
+h1 {
+  border-bottom: 3px solid var(--pd-text);
+  font-size: 3rem !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.035em;
+  line-height: 1.05 !important;
+  margin-bottom: 0.75rem !important;
+  padding-bottom: 0.6rem !important;
+}
+h1 > span:first-child::after { color: var(--pd-accent); content: "."; }
+h1 [data-testid="stHeaderActionElements"] { display: none; }
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {
+  color: var(--pd-muted) !important;
+  opacity: 1 !important;
+}
+
+/* Buttons: solid ink for the main action, with the accent saved for small moments */
+button[kind="primary"], [data-testid="stFormSubmitButton"] button {
+  background: var(--pd-text) !important;
+  border-color: var(--pd-text) !important;
+}
+button[kind="primary"], button[kind="primary"] p,
+[data-testid="stFormSubmitButton"] button, [data-testid="stFormSubmitButton"] button p {
+  color: var(--pd-bg) !important;
+  font-weight: 600;
+}
+button[kind="primary"]:hover, [data-testid="stFormSubmitButton"] button:hover {
+  background: var(--pd-accent) !important;
+  border-color: var(--pd-accent) !important;
+}
+button[kind="secondary"] { background: transparent; border-color: var(--pd-text); }
+button[kind="secondary"]:hover { background: var(--pd-text); border-color: var(--pd-text); color: var(--pd-bg); }
+button[kind="secondary"]:hover p { color: var(--pd-bg); }
+
+/* Keyboard focus stays obvious everywhere */
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible,
+[role="tab"]:focus-visible {
+  outline: 2px solid var(--pd-accent) !important;
+  outline-offset: 2px;
+}
+
+/* Login */
+[data-testid="stMain"]:has(.pd-login) [data-testid="stMainBlockContainer"] {
+  max-width: 460px;
+  padding-top: 7vh;
+}
+body:has(.pd-login) [data-testid="stHeader"] { background: transparent; }
+body:has(.pd-login) [data-testid="stHeader"] img,
+.st-key-login_intro [data-testid="stImage"] { display: none; }
+[data-testid="stMain"]:has(.pd-login) h1 { font-size: 4rem !important; }
+.pd-tagline {
+  font-family: Fraunces, Georgia, serif;
+  font-size: 1.45rem;
+  font-weight: 500;
+  line-height: 1.25;
+  margin: 0.25rem 0 1rem;
+}
+.pd-tagline em { color: var(--pd-accent); font-style: normal; }
+[data-testid="stMain"]:has(.pd-login) [data-testid="stForm"] {
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  background: var(--pd-glass);
+  border: 1px solid var(--pd-glass-edge);
+  border-radius: var(--pd-radius);
+  box-shadow: var(--pd-shadow);
+  padding: var(--pd-gap-4);
+}
+[data-testid="stMain"]:has(.pd-login) [data-testid="stForm"] [data-baseweb="input"],
+[data-testid="stMain"]:has(.pd-login) [data-testid="stForm"] [data-baseweb="base-input"],
+[data-testid="stMain"]:has(.pd-login) [data-testid="stForm"] input,
+[data-testid="stMain"]:has(.pd-login) [data-testid="stForm"] [data-baseweb="input"] button {
+  background: var(--pd-glass-strong);
+}
+.st-key-login_footer { align-items: flex-start; gap: var(--pd-gap-1); }
+.st-key-login_footer > div { width: fit-content !important; }
+
+/* Home: the choice of modes */
+.st-key-mode_assistant_card, .st-key-mode_general_card {
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  background: var(--pd-glass);
+  border: 1px solid var(--pd-glass-edge) !important;
+  border-radius: var(--pd-radius);
+  box-shadow: var(--pd-shadow);
+  height: 100%;
+  padding: var(--pd-gap-4);
+  transition: border-color 150ms ease, transform 150ms ease;
+}
+.st-key-mode_assistant_card:hover, .st-key-mode_general_card:hover {
+  border-color: var(--pd-text) !important;
+  transform: translateY(-2px);
+}
+.st-key-mode_assistant_card h3, .st-key-mode_general_card h3 {
+  font-size: 1.5rem;
+  letter-spacing: -0.02em;
+  padding: 0;
+}
+.st-key-mode_assistant_card [data-testid="stMarkdown"] p,
+.st-key-mode_general_card [data-testid="stMarkdown"] p { color: var(--pd-muted); margin-top: var(--pd-gap-1); }
+.st-key-home_cards [data-testid="stColumn"] > div { height: 100%; }
+
+/* Suggested questions */
+.st-key-suggestions button {
+  background: var(--pd-glass);
+  border: 1px solid var(--pd-line);
+  height: 100%;
+  min-height: 3.25rem;
+}
+.st-key-suggestions button:hover { background: var(--pd-text); border-color: var(--pd-text); }
+
+/* Chat */
+[data-testid="stChatMessage"] {
+  background: transparent !important;
+  gap: var(--pd-gap-3);
+  padding: var(--pd-gap-2) 0;
+}
+[data-testid="stChatMessage"]:has([aria-label="Chat message from user"]) { flex-direction: row-reverse; }
+[data-testid="stChatMessage"]:has([aria-label="Chat message from user"]) > :not([aria-label="Chat message from user"]) {
+  display: none;
+}
+[aria-label="Chat message from user"] {
+  background: var(--pd-text);
+  border-radius: var(--pd-radius) var(--pd-radius) 2px var(--pd-radius);
+  flex: 0 1 auto;
+  max-width: 85%;
+  padding: 0.6rem 1rem;
+  width: fit-content;
+}
+[aria-label="Chat message from user"], [aria-label="Chat message from user"] p,
+[aria-label="Chat message from user"] li { color: var(--pd-bg) !important; }
+[aria-label="Chat message from assistant"] { font-size: 1.03rem; line-height: 1.7; }
+[aria-label="Chat message from assistant"] h1 { border-bottom-width: 2px; font-size: 1.6rem !important; }
+[aria-label="Chat message from assistant"] h1 > span:first-child::after { content: none; }
+[aria-label="Chat message from assistant"] [data-testid="stCaptionContainer"] {
+  border-top: 1px solid var(--pd-text);
+  font-size: 0.8rem;
+  margin-top: var(--pd-gap-3);
+  padding-top: var(--pd-gap-2);
+}
+
+/* Message box */
+[data-testid="stBottomBlockContainer"] { max-width: 760px; padding: var(--pd-gap-3) 1rem var(--pd-gap-4); }
+[data-testid="stChatInput"] {
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  background: var(--pd-glass-strong) !important;
+  border: 1px solid var(--pd-glass-edge);
+  border-radius: var(--pd-radius);
+  box-shadow: var(--pd-shadow);
+}
+[data-testid="stChatInput"] > div, [data-testid="stChatInput"] textarea,
+[data-testid="stChatInput"] [data-baseweb="textarea"],
+[data-testid="stChatInput"] [data-baseweb="base-input"] { background: transparent !important; }
+
+/* Sidebar */
+[data-testid="stSidebar"] {
+  -webkit-backdrop-filter: blur(22px);
+  backdrop-filter: blur(22px);
+  background: var(--pd-glass);
+  border-right: 1px solid var(--pd-line);
+}
+[data-testid="stSidebar"] > div { background: transparent; }
+[data-testid="stSidebar"] button {
+  border-radius: 6px;
+  justify-content: flex-start;
+  min-height: 2.4rem;
+  transition: background 120ms ease;
+}
+[data-testid="stSidebar"] button > div { justify-content: flex-start; }
+[data-testid="stSidebar"] button[kind="secondary"] { background: transparent; border-color: transparent; }
+[data-testid="stSidebar"] button[kind="secondary"]:hover,
+[data-testid="stSidebar"] button[kind="tertiary"]:hover { background: var(--pd-line); color: var(--pd-text); }
+[data-testid="stSidebar"] button[kind="secondary"]:hover p { color: var(--pd-text); }
+[data-testid="stSidebar"] button[kind="primary"],
+[data-testid="stSidebar"] button[kind="primary"]:hover {
+  background: var(--pd-glass-strong) !important;
+  border: 0 !important;
+  border-left: 3px solid var(--pd-accent) !important;
+  border-radius: 0 6px 6px 0;
+}
+[data-testid="stSidebar"] button[kind="primary"], [data-testid="stSidebar"] button[kind="primary"] p {
+  color: var(--pd-text) !important;
+}
+.st-key-new_chat button { background: transparent !important; border: 1px solid var(--pd-text) !important; }
+[data-testid="stSidebar"] hr { border-color: var(--pd-line); margin: var(--pd-gap-3) 0; }
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p { color: var(--pd-muted); font-size: 0.8rem; }
+
+/* Recent chats: one line each, with delete shown on hover, on focus and on touch screens */
+[class*="st-key-chat_row_"] { flex-wrap: nowrap; gap: 0 !important; }
+[class*="st-key-chat_row_"] button p {
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+[class*="st-key-delete_"] button { opacity: 0; padding-inline: 0; }
+[class*="st-key-delete_"] button > div { justify-content: center; }
+[class*="st-key-chat_row_"]:hover [class*="st-key-delete_"] button,
+[class*="st-key-delete_"] button:focus-visible { opacity: 1; }
+@media (hover: none) { [class*="st-key-delete_"] button { opacity: 1; } }
+
+/* Settings and other pop-ups */
+[role="dialog"] {
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  background: var(--pd-glass-strong) !important;
+  border: 1px solid var(--pd-glass-edge);
+  border-radius: var(--pd-radius);
+}
+
+/* Small screens */
+@media (max-width: 640px) {
+  [data-testid="stMainBlockContainer"] { padding: 3.5rem 1rem 7rem; }
+  h1 { font-size: 2.3rem !important; }
+  [data-testid="stMain"]:has(.pd-login) h1 { font-size: 3.2rem !important; }
+  [aria-label="Chat message from user"] { max-width: 92%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; transform: none !important; }
+}
+
+/* Browsers without frosted glass get solid surfaces, so text stays readable */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root { --pd-glass: var(--pd-surface); --pd-glass-strong: var(--pd-surface); }
+}

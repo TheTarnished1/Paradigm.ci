@@ -38,25 +38,54 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 MAX_FAILED_LOGINS = 5
 LOCK_SECONDS = 300
+SESSION_SECONDS = 30 * 24 * 60 * 60
 MIN_PASSWORD_LENGTH = 8
 MAX_INDEX_BYTES = 30 * 1024 * 1024  # stops one user filling a small free database
 USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_.-]{3,30}")
 BUCKET = "assets"  # declared in neon.ts
 
-# Each rule: (per user?, most allowed, time window in seconds, what to tell the user).
-# ponytail: counts requests, not tokens. Groq's free tier allows 30 requests a minute and 200K tokens
-# a day, so 150 messages a day assumes about 1,300 tokens each. Raise these on a paid Groq plan.
 MINUTE = 60
 DAY = 24 * 60 * 60
+
+MODELS = {
+    "openai/gpt-oss-120b": "GPT-OSS 120B",
+    "openai/gpt-oss-20b": "GPT-OSS 20B",
+    "qwen/qwen3.8-27b": "Qwen 3.8",
+}
+DEFAULT_PLAN = "free"
+# ponytail: Paid is set by hand with `python store.py set-plan <username> paid`, with no payments yet.
+# Everyone shares one Groq key, so Paid can't exceed the shared limits below until that key is on a
+# paid Groq plan. Add real billing and raise the shared limits together.
+PLANS = {
+    "free": {
+        "label": "Free",
+        "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+        "messages_per_minute": 6,
+        "messages_per_day": 30,
+        "tool_calls": 2,
+    },
+    "paid": {
+        "label": "Paid",
+        "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
+        "messages_per_minute": 15,
+        "messages_per_day": 100,
+        "tool_calls": 10,
+    },
+}
+
+# Each rule: (per user?, most allowed, time window in seconds, what to tell the user).
+# ponytail: counts requests, not tokens. Groq's free tier allows 30 requests a minute and 200K tokens
+# a day, so 150 model calls a day assumes about 1,300 tokens each. Raise these on a paid Groq plan.
 LIMITS = {
-    "message": [
-        (True, 6, MINUTE, "You're sending messages quickly. Wait a minute and try again."),
-        (True, 30, DAY, "You've reached today's limit of 30 messages. Please come back tomorrow."),
+    "model_call": [
         (False, 20, MINUTE, "Paradigm is busy right now. Please try again in a minute."),
         (False, 150, DAY, "Paradigm has reached today's limit for everyone. Please try again tomorrow."),
     ],
     "upload": [
         (True, 5, DAY, "You've reached today's limit of 5 document uploads. Please come back tomorrow."),
+    ],
+    "recovery": [
+        (False, 30, 60 * MINUTE, "Too many password resets right now. Please try again in an hour."),
     ],
     "signup": [
         (False, 20, 60 * MINUTE, "Too many new accounts right now. Please try again in an hour."),
@@ -108,6 +137,25 @@ messages = Table(
     Column("sources", Text, nullable=False, default="[]"),
     Column("error", Integer, nullable=False, default=0),
     Index("messages_by_conversation", "conversation_id", "id"),
+)
+sessions = Table(
+    "sessions",
+    metadata,
+    Column("token_hash", String(64), primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("expires", Float, nullable=False),
+)
+recovery_codes = Table(
+    "recovery_codes",
+    metadata,
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("code_hash", String(64), nullable=False),
+)
+plans = Table(
+    "plans",
+    metadata,
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("plan", String(20), nullable=False),
 )
 usage = Table(
     "usage",
@@ -200,6 +248,106 @@ def verify_user(username, password):
         return None
 
 
+def _token_hash(token):
+    # A plain hash is enough here: these tokens are long and random, unlike passwords
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def create_session(user_id):
+    """Returns a new login token. Only its hash is stored."""
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    with engine().begin() as db:
+        db.execute(delete(sessions).where(sessions.c.expires < now))
+        db.execute(
+            insert(sessions).values(
+                token_hash=_token_hash(token), user_id=user_id, expires=now + SESSION_SECONDS
+            )
+        )
+    return token
+
+
+def user_from_session(token):
+    """Returns the (id, username) a login token belongs to, or None."""
+    with engine().connect() as db:
+        row = db.execute(
+            select(users.c.id, users.c.username)
+            .join(sessions, sessions.c.user_id == users.c.id)
+            .where(sessions.c.token_hash == _token_hash(token), sessions.c.expires > time.time())
+        ).first()
+    return (row[0], row[1]) if row else None
+
+
+def end_session(token):
+    with engine().begin() as db:
+        db.execute(delete(sessions).where(sessions.c.token_hash == _token_hash(token)))
+
+
+def new_recovery_code(user_id):
+    """Returns a new one-time recovery code, replacing any old one. Only its hash is stored."""
+    code = secrets.token_urlsafe(18)
+    with engine().begin() as db:
+        db.execute(delete(recovery_codes).where(recovery_codes.c.user_id == user_id))
+        db.execute(insert(recovery_codes).values(user_id=user_id, code_hash=_token_hash(code)))
+    return code
+
+
+def reset_password(username, code, new_password):
+    """Sets a new password using a recovery code. Returns None, or a message explaining the problem."""
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        return f"Passwords need at least {MIN_PASSWORD_LENGTH} characters."
+    wrong = "That username and recovery code don't match."
+    salt = secrets.token_bytes(16)
+    with engine().begin() as db:
+        row = db.execute(
+            select(users.c.id, recovery_codes.c.code_hash)
+            .join(recovery_codes, recovery_codes.c.user_id == users.c.id)
+            .where(users.c.username_key == username.lower())
+        ).first()
+        if row is None or not hmac.compare_digest(row[1], _token_hash(code)):
+            return wrong
+        db.execute(
+            update(users)
+            .where(users.c.id == row[0])
+            .values(salt=salt, password_hash=_hash(new_password, salt), failed_logins=0, locked_until=0)
+        )
+        db.execute(delete(recovery_codes).where(recovery_codes.c.user_id == row[0]))
+        db.execute(delete(sessions).where(sessions.c.user_id == row[0]))
+    return None
+
+
+def export_user_data(user_id):
+    """Returns everything saved for this user that they can read, as JSON-ready data."""
+    identity, doc_names = load_setup(user_id)
+    chats = []
+    with engine().connect() as db:
+        username = db.execute(select(users.c.username).where(users.c.id == user_id)).scalar_one()
+        rows = db.execute(
+            select(conversations.c.id, conversations.c.mode, conversations.c.title).where(
+                conversations.c.user_id == user_id
+            )
+        ).all()
+    for chat_id, mode, title in rows:
+        chats.append({"mode": mode, "title": title, "messages": load_messages(user_id, chat_id)})
+    return {"username": username, "setup": identity, "documents": doc_names, "chats": chats}
+
+
+def delete_account(user_id, password):
+    """Deletes the account and all its data if the password is right. Returns True if deleted."""
+    with engine().begin() as db:
+        user = db.execute(
+            select(users.c.salt, users.c.password_hash).where(users.c.id == user_id)
+        ).first()
+        if user is None or not hmac.compare_digest(_hash(password, user[0]), user[1]):
+            return False
+        bucket = _bucket()
+        if bucket:
+            bucket.delete_object(Bucket=BUCKET, Key=_document_key(user_id))
+        db.execute(delete(usage).where(usage.c.user_id == user_id))
+        db.execute(delete(users).where(users.c.id == user_id))
+    return True
+
+
 def load_setup(user_id):
     """Returns (identity or None if never saved, document names)."""
     with engine().connect() as db:
@@ -285,11 +433,42 @@ def save_documents(user_id, index_data):
         db.execute(insert(documents).values(user_id=user_id, index_data=index_data))
 
 
-def limit_message(kind, user_id=None):
+def get_plan(user_id):
+    with engine().connect() as db:
+        plan = db.execute(select(plans.c.plan).where(plans.c.user_id == user_id)).scalar_one_or_none()
+    return plan if plan in PLANS else DEFAULT_PLAN
+
+
+def set_plan(username, plan):
+    """Sets a user's plan. Returns False if there's no such user or plan."""
+    if plan not in PLANS:
+        return False
+    with engine().begin() as db:
+        user_id = db.execute(
+            select(users.c.id).where(users.c.username_key == username.lower())
+        ).scalar_one_or_none()
+        if user_id is None:
+            return False
+        db.execute(delete(plans).where(plans.c.user_id == user_id))
+        db.execute(insert(plans).values(user_id=user_id, plan=plan))
+    return True
+
+
+def _message_rules(plan):
+    details = PLANS[plan]
+    per_day = details["messages_per_day"]
+    return [
+        (True, details["messages_per_minute"], MINUTE, "You're sending messages quickly. Wait a minute and try again."),
+        (True, per_day, DAY, f"You've reached today's limit of {per_day} messages. Please come back tomorrow."),
+    ]
+
+
+def limit_message(kind, user_id=None, plan=None):
     """Returns what to tell the user if this action is over a limit, otherwise None."""
     now = time.time()
+    rules = LIMITS.get(kind, []) + (_message_rules(plan) if plan else [])
     with engine().connect() as db:
-        for per_user, most, window, message in LIMITS[kind]:
+        for per_user, most, window, message in rules:
             query = (
                 select(func.count())
                 .select_from(usage)
@@ -379,3 +558,17 @@ def add_message(user_id, conversation_id, role, content, sources=(), error=False
                 error=int(error),
             )
         )
+
+
+if __name__ == "__main__":
+    # python store.py set-plan <username> <free|paid>
+    import sys
+
+    from dotenv import load_dotenv
+
+    load_dotenv(".env.local")
+    load_dotenv()
+    if len(sys.argv) != 4 or sys.argv[1] != "set-plan":
+        sys.exit("Usage: python store.py set-plan <username> <free|paid>")
+    init_db()
+    sys.exit(0 if set_plan(sys.argv[2], sys.argv[3]) else "No such user or plan.")

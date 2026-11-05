@@ -7,4 +7,4 @@ data/
 .neon
 node_modules/
 .env.local
-.env.test-run
+.env.*
