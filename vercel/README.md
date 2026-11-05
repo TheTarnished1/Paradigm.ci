@@ -35,7 +35,7 @@ They create test accounts, so the database must be empty and disposable. GitHub 
 
 ## Deploy
 
-1. In Vercel, import this GitHub repo and set **Root Directory** to `vercel`.
+1. In Vercel, import this GitHub repo and set **Root Directory** to `vercel`. `vercel.json` defines two services: `app` (the site, public at `/`) and `api` (FastAPI, public at `/api`). The API sees the full `/api/...` path.
 2. Under **Settings → Environment Variables**, add `GROQ_API_KEY` and `DATABASE_URL`. Use the pooled Neon connection string.
 3. Create the new tables once. This only adds tables and never changes existing data:
 
