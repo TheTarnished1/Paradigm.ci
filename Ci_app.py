@@ -119,10 +119,13 @@ def sign_in_screen():
             if password != confirm:
                 st.error("Those passwords don't match.")
             else:
-                user_id, problem = store.create_user(username.strip(), password)
+                # Only successful sign-ups count, so bad attempts can't block real people
+                blocked = store.limit_message("signup")
+                user_id, problem = (None, blocked) if blocked else store.create_user(username.strip(), password)
                 if problem:
                     st.error(problem)
                 else:
+                    store.record_usage("signup")
                     begin_session(user_id, username.strip())
 
     st.caption(f"Made by {made_by}")
@@ -219,6 +222,11 @@ def setup_form():
         return
 
     if pdfs:
+        blocked = store.limit_message("upload", user_id)
+        if blocked:
+            st.warning(blocked)
+            return
+        store.record_usage("upload", user_id)
         try:
             with st.spinner("Reading your documents..."):
                 memory = index_uploads(pdfs)
@@ -424,7 +432,11 @@ def search_documents(query):
 prompt = st.chat_input(f"Message {speaker}", max_chars=4000)
 prompt = prompt or st.session_state.pop("pending_prompt", None)
 
-if prompt:
+blocked = store.limit_message("message", user_id) if prompt else None
+if blocked:
+    st.warning(blocked)
+elif prompt:
+    store.record_usage("message", user_id)
     if current_id is None:
         current_id = store.create_conversation(user_id, mode, prompt[:40])
         st.session_state.current_id = current_id

@@ -28,6 +28,7 @@ from sqlalchemy import (
     create_engine,
     delete,
     event,
+    func,
     insert,
     select,
     update,
@@ -41,6 +42,26 @@ MIN_PASSWORD_LENGTH = 8
 MAX_INDEX_BYTES = 30 * 1024 * 1024  # stops one user filling a small free database
 USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_.-]{3,30}")
 BUCKET = "assets"  # declared in neon.ts
+
+# Each rule: (per user?, most allowed, time window in seconds, what to tell the user).
+# ponytail: counts requests, not tokens. Groq's free tier allows 30 requests a minute and 200K tokens
+# a day, so 150 messages a day assumes about 1,300 tokens each. Raise these on a paid Groq plan.
+MINUTE = 60
+DAY = 24 * 60 * 60
+LIMITS = {
+    "message": [
+        (True, 6, MINUTE, "You're sending messages quickly. Wait a minute and try again."),
+        (True, 30, DAY, "You've reached today's limit of 30 messages. Please come back tomorrow."),
+        (False, 20, MINUTE, "Paradigm is busy right now. Please try again in a minute."),
+        (False, 150, DAY, "Paradigm has reached today's limit for everyone. Please try again tomorrow."),
+    ],
+    "upload": [
+        (True, 5, DAY, "You've reached today's limit of 5 document uploads. Please come back tomorrow."),
+    ],
+    "signup": [
+        (False, 20, 60 * MINUTE, "Too many new accounts right now. Please try again in an hour."),
+    ],
+}
 
 metadata = MetaData()
 users = Table(
@@ -87,6 +108,16 @@ messages = Table(
     Column("sources", Text, nullable=False, default="[]"),
     Column("error", Integer, nullable=False, default=0),
     Index("messages_by_conversation", "conversation_id", "id"),
+)
+usage = Table(
+    "usage",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("kind", String(20), nullable=False),
+    Column("user_id", Integer),
+    Column("at", Float, nullable=False),
+    Index("usage_by_kind", "kind", "at"),
+    Index("usage_by_user", "user_id", "kind", "at"),
 )
 
 
@@ -252,6 +283,32 @@ def save_documents(user_id, index_data):
     with engine().begin() as db:
         db.execute(delete(documents).where(documents.c.user_id == user_id))
         db.execute(insert(documents).values(user_id=user_id, index_data=index_data))
+
+
+def limit_message(kind, user_id=None):
+    """Returns what to tell the user if this action is over a limit, otherwise None."""
+    now = time.time()
+    with engine().connect() as db:
+        for per_user, most, window, message in LIMITS[kind]:
+            query = (
+                select(func.count())
+                .select_from(usage)
+                .where(usage.c.kind == kind, usage.c.at > now - window)
+            )
+            if per_user:
+                query = query.where(usage.c.user_id == user_id)
+            if db.execute(query).scalar() >= most:
+                return message
+    return None
+
+
+# ponytail: checking then recording can let a burst slip slightly over a limit. That's fine for
+# protecting a quota, and Groq's own limits still apply. Use a transaction lock if limits get strict.
+def record_usage(kind, user_id=None):
+    now = time.time()
+    with engine().begin() as db:
+        db.execute(insert(usage).values(kind=kind, user_id=user_id, at=now))
+        db.execute(delete(usage).where(usage.c.at < now - 2 * DAY))
 
 
 def create_conversation(user_id, mode, title):

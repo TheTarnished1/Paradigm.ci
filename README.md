@@ -110,6 +110,8 @@ NEON_FUNCTION_HELLO_BASE_URL = "..."
 
 Never commit these values. The tables are created on first run.
 
+After merging changes, reboot the app from its **⋮** menu on Streamlit Cloud. File watching is off, so updated modules and new tables only load on a restart.
+
 ## Tests
 
 ```bash
