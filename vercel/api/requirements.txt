@@ -1,0 +1,7 @@
+fastapi
+groq
+python-multipart
+psycopg[binary]
+SQLAlchemy
+pypdf
+ddgs
