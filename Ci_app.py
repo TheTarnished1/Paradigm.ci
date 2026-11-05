@@ -1,8 +1,8 @@
 import json
 import logging
 import os
+import shutil
 import tempfile
-import uuid
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -11,14 +11,25 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
-from ci_setup_tools import EMBEDDING_MODEL, build_index, read_pdf
+import store
+from ci_setup_tools import EMBEDDING_MODEL, build_index, model_status, read_pdf
 
 st.set_page_config(page_title="Paradigm", page_icon="⚡", layout="centered")
 load_dotenv()
 
+ASSISTANT = "assistant"
+GENERAL = "general"
+MODE_LABELS = {ASSISTANT: "Assistant", GENERAL: "General chat"}
+MAX_PDFS = 5
+HISTORY_MESSAGES = 10
 DEFAULT_DNA = {
+    "made_by": "Pascal",
     "dna_identity": {"ci_name": "Paradigm", "base_personality": "Helpful and direct."},
-    "dna_synapse": {"model": "openai/gpt-oss-120b", "creativity_index": 0.5, "memory_window": 5},
+    "dna_synapse": {"model": "openai/gpt-oss-120b", "creativity_index": 0.5},
+}
+SUGGESTIONS = {
+    ASSISTANT: ["What can you help me with?", "Summarize my documents", "Help me plan my week"],
+    GENERAL: ["Explain something simply", "Help me write a message", "Give me an idea to try"],
 }
 
 
@@ -49,15 +60,19 @@ def load_embeddings():
 
 
 @st.cache_resource(show_spinner=False)
-def load_shared_memory():
-    if not os.path.isdir("faiss_index"):
-        return None
-    # The index is built by ci_setup_tools.py on the server, never uploaded by users
-    return FAISS.load_local("faiss_index", load_embeddings(), allow_dangerous_deserialization=True)
+def prepare_database():
+    store.init_db()
+
+
+@st.cache_data(ttl=60, show_spinner="Checking status...")
+def cached_status(model):
+    return model_status(model, os.getenv("GROQ_API_KEY"))
 
 
 dna = load_dna()
 synapse_dna = dna["dna_synapse"]
+made_by = dna.get("made_by", "Pascal")
+prepare_database()
 try:
     synapse = load_synapse(synapse_dna["model"], synapse_dna.get("creativity_index", 0.5))
 except Exception:
@@ -66,31 +81,85 @@ except Exception:
     st.stop()
 
 
-# --- SESSION STATE ---
-# ponytail: setup lasts for this browser session only, so visitors can't change each other's
-# assistant. Add logins and a database when setups need to survive a refresh.
-defaults = {
-    "identity": dict(dna["dna_identity"]),
-    "conversations": [],
-    "current_id": None,
-    "user_memory": None,
-    "doc_names": [],
-}
-for key, value in defaults.items():
-    st.session_state.setdefault(key, value)
+# --- SIGN IN ---
+def begin_session(user_id, username):
+    st.session_state.user_id = user_id
+    st.session_state.username = username
+    st.rerun()
+
+
+def sign_in_screen():
+    st.title("⚡ Paradigm")
+    st.write("Your assistant, set up your way. Your chats are saved to your account.")
+    log_in, sign_up = st.tabs(["Log in", "Create account"])
+
+    with log_in, st.form("log_in"):
+        username = st.text_input("Username", key="login_username")
+        password = st.text_input("Password", type="password", key="login_password")
+        if st.form_submit_button("Log in", type="primary", use_container_width=True):
+            user = store.verify_user(username.strip(), password)
+            if user:
+                begin_session(*user)
+            st.error("Wrong username or password. After 5 failed tries, wait 5 minutes.")
+
+    with sign_up, st.form("sign_up"):
+        username = st.text_input("Username", key="signup_username")
+        password = st.text_input("Password", type="password", key="signup_password")
+        confirm = st.text_input("Repeat password", type="password", key="signup_confirm")
+        st.caption(
+            "Your messages and documents are sent to Groq, our AI provider, to create replies. "
+            "There's no password reset yet, so keep your password safe."
+        )
+        if st.form_submit_button("Create account", type="primary", use_container_width=True):
+            if password != confirm:
+                st.error("Those passwords don't match.")
+            else:
+                user_id, problem = store.create_user(username.strip(), password)
+                if problem:
+                    st.error(problem)
+                else:
+                    begin_session(user_id, username.strip())
+
+    st.caption(f"Made by {made_by}")
+
+
+# ponytail: login lasts for the browser session, so a refresh asks for it again. Streamlit can't
+# set cookies. st.login with Google or similar fixes this, once an OAuth app is set up.
+if "user_id" not in st.session_state:
+    sign_in_screen()
+    st.stop()
+
+
+# --- SESSION ---
+user_id = st.session_state.user_id
+st.session_state.setdefault("mode", None)
+st.session_state.setdefault("current_id", None)
+
+if "identity" not in st.session_state:
+    saved_identity, saved_docs = store.load_setup(user_id)
+    default_identity = {**dna["dna_identity"], "business_name": ""}
+    st.session_state.identity = saved_identity or default_identity
+    st.session_state.doc_names = saved_docs
 
 identity = st.session_state.identity
 assistant_name = identity.get("ci_name") or "Paradigm"
+mode = st.session_state.mode
 
 
-def current_conversation():
-    for conversation in st.session_state.conversations:
-        if conversation["id"] == st.session_state.current_id:
-            return conversation
-    return None
+def load_user_memory():
+    """Loads this user's document index once per session. Returns None if they have none."""
+    if "user_memory" not in st.session_state:
+        folder = store.user_docs_dir(user_id)
+        st.session_state.user_memory = (
+            # Safe to unpickle: the server builds this file itself and users can't upload to it
+            FAISS.load_local(folder, load_embeddings(), allow_dangerous_deserialization=True)
+            if os.path.isdir(folder)
+            else None
+        )
+    return st.session_state.user_memory
 
 
-# --- SETUP SCREEN ---
+# --- SETTINGS ---
 def index_uploads(files):
     raw_docs = []
     with tempfile.TemporaryDirectory() as folder:
@@ -102,8 +171,14 @@ def index_uploads(files):
     return build_index(raw_docs, load_embeddings())
 
 
-@st.dialog("Set up your assistant")
-def setup_dialog():
+def save_documents(memory):
+    folder = store.user_docs_dir(user_id)
+    shutil.rmtree(folder, ignore_errors=True)
+    memory.save_local(folder)
+    st.session_state.user_memory = memory
+
+
+def setup_form():
     with st.form("setup"):
         name = st.text_input("Assistant name", identity.get("ci_name", ""), max_chars=40)
         owner = st.text_input(
@@ -128,17 +203,19 @@ def setup_dialog():
             "Documents it can answer from",
             type="pdf",
             accept_multiple_files=True,
-            help="New uploads replace the current documents. 10 MB per file.",
+            help=f"Up to {MAX_PDFS} PDFs, 10 MB each. New uploads replace the current documents.",
         )
         if st.session_state.doc_names:
             st.caption("Current documents: " + ", ".join(st.session_state.doc_names))
-        st.caption("Your setup and documents last until you close or refresh this tab.")
         saved = st.form_submit_button("Save", type="primary", use_container_width=True)
 
     if not saved:
         return
     if not name.strip():
         st.error("Give your assistant a name.")
+        return
+    if len(pdfs) > MAX_PDFS:
+        st.error(f"Please upload {MAX_PDFS} PDFs or fewer.")
         return
 
     if pdfs:
@@ -151,7 +228,7 @@ def setup_dialog():
         if memory is None:
             st.error("Couldn't find readable text in those PDFs. Scanned pages won't work yet.")
             return
-        st.session_state.user_memory = memory
+        save_documents(memory)
         st.session_state.doc_names = [pdf.name for pdf in pdfs]
 
     identity.update(
@@ -160,69 +237,145 @@ def setup_dialog():
         base_personality=personality.strip(),
         core_directive=directive.strip(),
     )
+    store.save_setup(user_id, identity, st.session_state.doc_names)
     st.rerun()
 
 
-# --- SIDEBAR ---
-with st.sidebar:
-    if st.button("New chat", icon=":material/add:", use_container_width=True):
-        st.session_state.current_id = None
-        st.rerun()
-    if st.button("Set up", icon=":material/settings:", use_container_width=True):
-        setup_dialog()
+def status_panel():
+    online, message = cached_status(synapse_dna["model"])
+    if online:
+        st.success(message, icon=":material/check_circle:")
+    else:
+        st.error(message, icon=":material/error:")
+    st.markdown(f"**Model:** `{synapse_dna['model']}`")
+    st.markdown(f"**Assistant:** {assistant_name}")
+    documents = st.session_state.doc_names
+    st.markdown(f"**Documents:** {', '.join(documents) if documents else 'None'}")
+    st.caption("Status is checked at most once a minute.")
 
-    if st.session_state.conversations:
-        st.subheader("Recent")
-    for conversation in reversed(st.session_state.conversations[-20:]):
-        title_column, delete_column = st.columns([0.82, 0.18])
-        active = conversation["id"] == st.session_state.current_id
-        if title_column.button(
-            conversation["title"],
-            key=f"open_{conversation['id']}",
-            type="primary" if active else "secondary",
+
+@st.dialog("Settings")
+def settings_dialog():
+    setup_tab, status_tab, account_tab = st.tabs(["Setup", "Status", "Account"])
+    with setup_tab:
+        setup_form()
+    with status_tab:
+        status_panel()
+    with account_tab:
+        st.write(f"Logged in as **{st.session_state.username}**")
+        if st.button("Log out", use_container_width=True):
+            st.session_state.clear()
+            st.rerun()
+        st.caption(f"Made by {made_by}")
+
+
+# --- SIDEBAR ---
+def select_mode(new_mode):
+    st.session_state.mode = new_mode
+    st.session_state.current_id = None
+    st.rerun()
+
+
+with st.sidebar:
+    st.markdown("## ⚡ Paradigm")
+    for key, label in MODE_LABELS.items():
+        icon = ":material/support_agent:" if key == ASSISTANT else ":material/chat:"
+        if st.button(
+            label,
+            key=f"mode_{key}",
+            icon=icon,
+            type="primary" if mode == key else "secondary",
             use_container_width=True,
         ):
-            st.session_state.current_id = conversation["id"]
+            select_mode(key)
+
+    if mode:
+        st.divider()
+        if st.button("New chat", icon=":material/add:", use_container_width=True):
+            st.session_state.current_id = None
             st.rerun()
-        if delete_column.button(
-            "",
-            key=f"delete_{conversation['id']}",
-            icon=":material/delete:",
-            help="Delete this chat",
-        ):
-            st.session_state.conversations.remove(conversation)
-            if active:
-                st.session_state.current_id = None
-            st.rerun()
+        conversations = store.list_conversations(user_id, mode)
+        if conversations:
+            st.caption("Recent")
+        for item in conversations:
+            title_column, delete_column = st.columns([0.8, 0.2])
+            active = item["id"] == st.session_state.current_id
+            if title_column.button(
+                item["title"],
+                key=f"open_{item['id']}",
+                type="primary" if active else "tertiary",
+                use_container_width=True,
+            ):
+                st.session_state.current_id = item["id"]
+                st.rerun()
+            if delete_column.button(
+                "",
+                key=f"delete_{item['id']}",
+                icon=":material/delete:",
+                type="tertiary",
+                help="Delete this chat",
+            ):
+                store.delete_conversation(user_id, item["id"])
+                if active:
+                    st.session_state.current_id = None
+                st.rerun()
+
+    st.divider()
+    if st.button("Settings", icon=":material/settings:", use_container_width=True):
+        settings_dialog()
+    st.caption(f"Made by {made_by}")
 
 
-# --- CHAT SCREEN ---
-conversation = current_conversation()
-messages = conversation["messages"] if conversation else []
+# --- HOME: CHOOSE A MODE ---
+if mode is None:
+    st.title(f"Welcome, {st.session_state.username}")
+    st.write("How do you want to work today?")
+    assistant_column, general_column = st.columns(2)
+    with assistant_column.container(border=True):
+        st.subheader(assistant_name)
+        st.write("Your assistant, with your personality, instructions and documents.")
+        if st.button("Open Assistant", type="primary", use_container_width=True):
+            select_mode(ASSISTANT)
+    with general_column.container(border=True):
+        st.subheader("General chat")
+        st.write("Ask anything. It doesn't use your setup or your documents.")
+        if st.button("Open General chat", use_container_width=True):
+            select_mode(GENERAL)
+    st.stop()
+
+
+# --- CHAT ---
+speaker = assistant_name if mode == ASSISTANT else "Paradigm"
+current_id = st.session_state.current_id
+messages = store.load_messages(user_id, current_id) if current_id else []
+
+AVATARS = {"assistant": "⚡", "user": ":material/person:"}
 
 if not messages:
-    st.title(f"Hi, I'm {assistant_name}")
-    owner = identity.get("business_name")
-    st.write(f"Here to help {owner}." if owner else "What can I help you with?")
-
-    suggestions = ["What can you help me with?", "Explain something simply", "Help me plan my week"]
-    if st.session_state.doc_names:
-        suggestions[0] = "Summarize my documents"
-    for column, suggestion in zip(st.columns(3), suggestions):
+    if mode == ASSISTANT:
+        st.title(f"Hi, I'm {speaker}")
+        owner = identity.get("business_name")
+        st.write(f"Here to help {owner}." if owner else "What can I help you with?")
+    else:
+        st.title("General chat")
+        st.write("Ask me anything.")
+    for column, suggestion in zip(st.columns(3), SUGGESTIONS[mode]):
         if column.button(suggestion, use_container_width=True):
             st.session_state.pending_prompt = suggestion
-    if st.button("Set up your assistant", icon=":material/settings:", type="tertiary"):
-        setup_dialog()
+    if mode == ASSISTANT and not st.session_state.doc_names:
+        st.caption("Add your name, instructions and documents in Settings.")
 
 for message in messages:
-    with st.chat_message(message["role"]):
+    with st.chat_message(message["role"], avatar=AVATARS[message["role"]]):
         st.markdown(message["content"])
-        if message.get("sources"):
+        if message["sources"]:
             st.caption("Sources: " + ", ".join(message["sources"]))
 
 
 def build_messages(query, context, history):
-    system = f"""You are {assistant_name}, an AI assistant{f" for {identity['business_name']}" if identity.get("business_name") else ""}.
+    if mode == ASSISTANT:
+        owner = identity.get("business_name")
+        system = f"""You are {speaker}, an AI assistant{f" for {owner}" if owner else ""}.
 Personality: {identity.get("base_personality") or "Helpful and direct."}
 Your job: {identity.get("core_directive") or "Give useful, accurate answers."}
 
@@ -234,6 +387,10 @@ Rules:
 
 Documents:
 {context or "None provided."}"""
+    else:
+        system = """You are Paradigm, a helpful general-purpose AI assistant.
+Be concise by default, and go deeper when asked.
+Never make up facts, sources or links. If you aren't sure, say so."""
     chat = [SystemMessage(content=system)]
     for past in history:
         role = HumanMessage if past["role"] == "user" else AIMessage
@@ -243,48 +400,46 @@ Documents:
 
 
 def search_documents(query):
-    memory = st.session_state.user_memory or load_shared_memory()
+    if mode != ASSISTANT or not st.session_state.doc_names:
+        return "", []
+    memory = load_user_memory()
     if memory is None:
         return "", []
     docs = memory.similarity_search(query, k=3)
     sources = []
     for doc in docs:
-        name = os.path.basename(doc.metadata.get("source", "Document"))
-        source = f"{name} (page {doc.metadata.get('page', 0) + 1})"
+        source = f"{doc.metadata.get('source', 'Document')} (page {doc.metadata.get('page', 0) + 1})"
         if source not in sources:
             sources.append(source)
     return "\n\n".join(doc.page_content for doc in docs), sources
 
 
-prompt = st.chat_input(f"Message {assistant_name}", max_chars=4000)
+prompt = st.chat_input(f"Message {speaker}", max_chars=4000)
 prompt = prompt or st.session_state.pop("pending_prompt", None)
 
 if prompt:
-    if conversation is None:
-        conversation = {"id": uuid.uuid4().hex, "title": prompt[:30], "messages": []}
-        st.session_state.conversations.append(conversation)
-        st.session_state.current_id = conversation["id"]
-        messages = conversation["messages"]
+    if current_id is None:
+        current_id = store.create_conversation(user_id, mode, prompt[:40])
+        st.session_state.current_id = current_id
 
-    window = synapse_dna.get("memory_window", 5) * 2
-    history = [m for m in messages if not m.get("error")][-window:]
-    messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
+    history = [m for m in messages if not m["error"]][-HISTORY_MESSAGES:]
+    store.add_message(user_id, current_id, "user", prompt)
+    with st.chat_message("user", avatar=AVATARS["user"]):
         st.markdown(prompt)
 
-    with st.chat_message("assistant"):
+    with st.chat_message("assistant", avatar=AVATARS["assistant"]):
         try:
             context, sources = search_documents(prompt)
             chat = build_messages(prompt, context, history)
             reply = st.write_stream(chunk.content for chunk in synapse.stream(chat))
-            messages.append({"role": "assistant", "content": reply, "sources": sources})
+            store.add_message(user_id, current_id, "assistant", reply, sources=sources)
         except Exception:
             logging.exception("Chat request failed")
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": "Sorry, I couldn't answer that. Please try again.",
-                    "error": True,
-                }
+            store.add_message(
+                user_id,
+                current_id,
+                "assistant",
+                "Sorry, I couldn't answer that. Please try again.",
+                error=True,
             )
     st.rerun()

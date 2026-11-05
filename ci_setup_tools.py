@@ -1,6 +1,7 @@
 import os
 import json
 import glob
+import urllib.request
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -23,6 +24,22 @@ def build_index(raw_docs, embeddings):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = text_splitter.split_documents(raw_docs)
     return FAISS.from_documents(chunks, embeddings) if chunks else None
+
+
+def model_status(model, api_key):
+    """Asks Groq whether the model is usable. Returns (ok, message for the status screen)."""
+    request = urllib.request.Request(
+        "https://api.groq.com/openai/v1/models",
+        headers={"Authorization": f"Bearer {api_key}", "User-Agent": "paradigm"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            available = {entry["id"] for entry in json.load(response)["data"]}
+    except (OSError, ValueError, KeyError):
+        return False, "Offline: can't reach the AI service"
+    if model not in available:
+        return False, "Offline: this model is no longer available"
+    return True, "Online"
 
 
 class CISetup:

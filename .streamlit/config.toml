@@ -8,8 +8,22 @@ gatherUsageStats = false
 maxUploadSize = 10
 fileWatcherType = "none"
 
+[theme]
+baseRadius = "large"
+buttonRadius = "full"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+headingFontWeights = 600
+
 [theme.light]
 primaryColor = "#C2410C"
+backgroundColor = "#FBFAF8"
+secondaryBackgroundColor = "#F2EFEA"
+textColor = "#1C1917"
+borderColor = "#E2DDD5"
 
 [theme.dark]
 primaryColor = "#FB923C"
+backgroundColor = "#0F0E0D"
+secondaryBackgroundColor = "#1C1A18"
+textColor = "#F5F2EE"
+borderColor = "#2E2B28"
