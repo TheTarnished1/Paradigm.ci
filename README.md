@@ -90,4 +90,25 @@ docs/ - Place your PDF training files here.
 
 faiss_index/ - The database created by the setup tool (do not edit manually).
 
+## Deploy for free
 
+The web app runs on Streamlit Community Cloud, and accounts and chats live in a free Postgres database. Without `DATABASE_URL`, it uses a local SQLite file, which Streamlit Cloud can wipe on restart.
+
+1. Create a free Postgres database, for example on [Neon](https://neon.tech), and copy its connection string.
+2. Create an app on [Streamlit Community Cloud](https://share.streamlit.io) from this repo, with `Ci_app.py` as the main file.
+3. In the app's **Advanced settings → Secrets**, add:
+
+```toml
+GROQ_API_KEY = "your-groq-key"
+DATABASE_URL = "your-postgres-connection-string"
+```
+
+Never commit these values. The tables are created on first run.
+
+## Tests
+
+```bash
+python test_app.py
+```
+
+To run them against Postgres, set `TEST_DATABASE_URL` to an empty, throwaway database. They create test accounts there.

@@ -10,9 +10,14 @@ from unittest.mock import patch
 data_folder = tempfile.mkdtemp()
 os.environ["GROQ_API_KEY"] = "test-key-not-real"
 os.environ["PARADIGM_DATA"] = data_folder  # keeps test accounts out of the real database
+os.environ.pop("DATABASE_URL", None)
+if os.environ.get("TEST_DATABASE_URL"):  # an empty, throwaway Postgres database
+    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
 
 import streamlit as st
+from langchain_community.vectorstores import FAISS
 from langchain_core.embeddings import DeterministicFakeEmbedding
+from sqlalchemy import select, update
 from streamlit.testing.v1 import AppTest
 
 import store
@@ -35,8 +40,10 @@ assert store.verify_user("alice", "wrong-password") is None
 assert store.verify_user("nobody", PASSWORD) is None
 
 # Passwords are never stored as text
-with store.connect() as db:
-    stored = db.execute("SELECT password_hash FROM users WHERE id = ?", (alice,)).fetchone()[0]
+with store.engine().connect() as db:
+    stored = db.execute(
+        select(store.users.c.password_hash).where(store.users.c.id == alice)
+    ).scalar_one()
 assert PASSWORD.encode() not in stored
 
 # Repeated failures lock the account, even for the right password, then it recovers
@@ -44,8 +51,8 @@ carol, _ = store.create_user("carol", PASSWORD)
 for _ in range(store.MAX_FAILED_LOGINS):
     assert store.verify_user("carol", "wrong-password") is None
 assert store.verify_user("carol", PASSWORD) is None
-with store.connect() as db:
-    db.execute("UPDATE users SET locked_until = 0 WHERE id = ?", (carol,))
+with store.engine().begin() as db:
+    db.execute(update(store.users).where(store.users.c.id == carol).values(locked_until=0))
 assert store.verify_user("carol", PASSWORD) == (carol, "carol")
 
 # --- One user can't reach another user's chats ---
@@ -237,11 +244,24 @@ index = build_index(docs, embeddings)
 found = index.similarity_search("refund", k=1)[0]
 assert "Refund policy" in found.page_content and found.metadata["source"] == "policy.pdf"
 assert build_index([], embeddings) is None, "no readable text is reported, not a crash"
-try:
-    store.user_docs_dir("../../evil")
-    raise AssertionError("a user id must not be able to change the folder")
-except ValueError:
-    pass
+
+# Saved indexes come back intact, belong to one user, and replace the old one
+assert store.load_documents(alice) is None
+store.save_documents(alice, b"old")
+store.save_documents(alice, index.serialize_to_bytes())
+assert store.load_documents(bob) is None
+restored = FAISS.deserialize_from_bytes(
+    store.load_documents(alice), embeddings, allow_dangerous_deserialization=True
+)
+assert "Refund policy" in restored.similarity_search("refund", k=1)[0].page_content
+
+# Deleting a chat also deletes its messages
+chat = store.create_conversation(alice, "general", "Temporary")
+store.add_message(alice, chat, "user", "soon gone")
+store.delete_conversation(alice, chat)
+with store.engine().connect() as db:
+    left = db.execute(select(store.messages).where(store.messages.c.conversation_id == chat)).all()
+assert left == [], "messages must not outlive their chat"
 
 
 # --- The status check reports what Groq says ---

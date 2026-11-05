@@ -9,3 +9,5 @@ huggingface-hub
 slack_bolt
 pypdf
 langchain-text-splitters
+SQLAlchemy
+psycopg[binary]

@@ -1,71 +1,115 @@
-"""Accounts, setups and saved chats. Every chat query is scoped to the user who owns it."""
+"""Accounts, setups, documents and saved chats. Every chat query is scoped to the user who owns it.
+
+Uses Postgres when DATABASE_URL is set, and a local SQLite file otherwise.
+"""
 import hashlib
 import hmac
 import json
 import os
 import re
 import secrets
-import sqlite3
 import time
 import uuid
+from functools import lru_cache
+
+from sqlalchemy import (
+    Column,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    MetaData,
+    String,
+    Table,
+    Text,
+    create_engine,
+    delete,
+    event,
+    insert,
+    select,
+    update,
+)
+from sqlalchemy.exc import IntegrityError
 
 MAX_FAILED_LOGINS = 5
 LOCK_SECONDS = 300
 MIN_PASSWORD_LENGTH = 8
+MAX_INDEX_BYTES = 30 * 1024 * 1024  # stops one user filling a small free database
 USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_.-]{3,30}")
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY,
-    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    salt BLOB NOT NULL,
-    password_hash BLOB NOT NULL,
-    failed_logins INTEGER NOT NULL DEFAULT 0,
-    locked_until REAL NOT NULL DEFAULT 0,
-    identity TEXT,
-    doc_names TEXT NOT NULL DEFAULT '[]'
-);
-CREATE TABLE IF NOT EXISTS conversations (
-    id TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    mode TEXT NOT NULL,
-    title TEXT NOT NULL,
-    updated REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY,
-    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    sources TEXT NOT NULL DEFAULT '[]',
-    error INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS conversations_by_user ON conversations(user_id, mode, updated);
-CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages(conversation_id, id);
-"""
+metadata = MetaData()
+users = Table(
+    "users",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("username", String(30), nullable=False),
+    Column("username_key", String(30), nullable=False, unique=True),  # lowercase, for matching
+    Column("salt", LargeBinary, nullable=False),
+    Column("password_hash", LargeBinary, nullable=False),
+    Column("failed_logins", Integer, nullable=False, default=0),
+    Column("locked_until", Float, nullable=False, default=0),
+    Column("identity", Text),
+    Column("doc_names", Text, nullable=False, default="[]"),
+)
+documents = Table(
+    "documents",
+    metadata,
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("index_data", LargeBinary, nullable=False),
+)
+conversations = Table(
+    "conversations",
+    metadata,
+    Column("id", String(32), primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("mode", String(20), nullable=False),
+    Column("title", Text, nullable=False),
+    Column("updated", Float, nullable=False),
+    Index("conversations_by_user", "user_id", "mode", "updated"),
+)
+messages = Table(
+    "messages",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column(
+        "conversation_id",
+        String(32),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("role", String(20), nullable=False),
+    Column("content", Text, nullable=False),
+    Column("sources", Text, nullable=False, default="[]"),
+    Column("error", Integer, nullable=False, default=0),
+    Index("messages_by_conversation", "conversation_id", "id"),
+)
 
 
-def data_dir():
-    return os.environ.get("PARADIGM_DATA", "data")
+def database_url():
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return re.sub(r"^postgres(ql)?://", "postgresql+psycopg://", url)
+    folder = os.environ.get("PARADIGM_DATA", "data")
+    os.makedirs(folder, exist_ok=True)
+    return f"sqlite:///{os.path.join(folder, 'paradigm.db')}"
 
 
-def user_docs_dir(user_id):
-    return os.path.join(data_dir(), "users", str(int(user_id)), "faiss_index")
-
-
-# ponytail: SQLite on local disk, fine for one server. It needs a persistent disk, and hosts like
-# Streamlit Cloud wipe files on restart. Move to Postgres when hosting or traffic needs it.
-def connect():
-    os.makedirs(data_dir(), exist_ok=True)
-    db = sqlite3.connect(os.path.join(data_dir(), "paradigm.db"))
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys = ON")
-    return db
+@lru_cache(maxsize=1)
+def engine():
+    # pre_ping and recycle: free hosted databases sleep and drop idle connections
+    db_engine = create_engine(database_url(), pool_pre_ping=True, pool_recycle=300)
+    if db_engine.dialect.name == "sqlite":
+        event.listen(
+            db_engine,
+            "connect",
+            lambda connection, _: connection.execute("PRAGMA foreign_keys = ON"),
+        )
+    return db_engine
 
 
 def init_db():
-    with connect() as db:
-        db.executescript(SCHEMA)
+    metadata.create_all(engine())
 
 
 def _hash(password, salt):
@@ -80,90 +124,115 @@ def create_user(username, password):
         return None, f"Passwords need at least {MIN_PASSWORD_LENGTH} characters."
     salt = secrets.token_bytes(16)
     try:
-        with connect() as db:
-            cursor = db.execute(
-                "INSERT INTO users (username, salt, password_hash) VALUES (?, ?, ?)",
-                (username, salt, _hash(password, salt)),
+        with engine().begin() as db:
+            result = db.execute(
+                insert(users).values(
+                    username=username,
+                    username_key=username.lower(),
+                    salt=salt,
+                    password_hash=_hash(password, salt),
+                )
             )
-            return cursor.lastrowid, None
-    except sqlite3.IntegrityError:
+            return result.inserted_primary_key[0], None
+    except IntegrityError:
         return None, "That username is taken."
 
 
 def verify_user(username, password):
     """Returns the matching user's (id, username), or None. Wrong passwords lock the account briefly."""
-    with connect() as db:
-        user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    with engine().begin() as db:
+        user = db.execute(
+            select(users).where(users.c.username_key == username.lower())
+        ).mappings().first()
         if user is None:
             _hash(password, b"\0" * 16)  # same work as a real check, so timing doesn't reveal usernames
             return None
         matches = hmac.compare_digest(_hash(password, user["salt"]), user["password_hash"])
         if user["locked_until"] > time.time():
             return None
+        this_user = update(users).where(users.c.id == user["id"])
         if matches:
-            db.execute("UPDATE users SET failed_logins = 0 WHERE id = ?", (user["id"],))
+            db.execute(this_user.values(failed_logins=0))
             return user["id"], user["username"]
         failed = user["failed_logins"] + 1
         if failed >= MAX_FAILED_LOGINS:
-            db.execute(
-                "UPDATE users SET failed_logins = 0, locked_until = ? WHERE id = ?",
-                (time.time() + LOCK_SECONDS, user["id"]),
-            )
+            db.execute(this_user.values(failed_logins=0, locked_until=time.time() + LOCK_SECONDS))
         else:
-            db.execute("UPDATE users SET failed_logins = ? WHERE id = ?", (failed, user["id"]))
+            db.execute(this_user.values(failed_logins=failed))
         return None
 
 
 def load_setup(user_id):
     """Returns (identity or None if never saved, document names)."""
-    with connect() as db:
-        row = db.execute("SELECT identity, doc_names FROM users WHERE id = ?", (user_id,)).fetchone()
+    with engine().connect() as db:
+        row = db.execute(
+            select(users.c.identity, users.c.doc_names).where(users.c.id == user_id)
+        ).mappings().one()
     return (json.loads(row["identity"]) if row["identity"] else None), json.loads(row["doc_names"])
 
 
 def save_setup(user_id, identity, doc_names):
-    with connect() as db:
+    with engine().begin() as db:
         db.execute(
-            "UPDATE users SET identity = ?, doc_names = ? WHERE id = ?",
-            (json.dumps(identity), json.dumps(doc_names), user_id),
+            update(users)
+            .where(users.c.id == user_id)
+            .values(identity=json.dumps(identity), doc_names=json.dumps(doc_names))
         )
+
+
+def load_documents(user_id):
+    """Returns this user's saved document index as bytes, or None."""
+    with engine().connect() as db:
+        return db.execute(
+            select(documents.c.index_data).where(documents.c.user_id == user_id)
+        ).scalar_one_or_none()
+
+
+def save_documents(user_id, index_data):
+    with engine().begin() as db:
+        db.execute(delete(documents).where(documents.c.user_id == user_id))
+        db.execute(insert(documents).values(user_id=user_id, index_data=index_data))
 
 
 def create_conversation(user_id, mode, title):
     conversation_id = uuid.uuid4().hex
-    with connect() as db:
+    with engine().begin() as db:
         db.execute(
-            "INSERT INTO conversations (id, user_id, mode, title, updated) VALUES (?, ?, ?, ?, ?)",
-            (conversation_id, user_id, mode, title, time.time()),
+            insert(conversations).values(
+                id=conversation_id, user_id=user_id, mode=mode, title=title, updated=time.time()
+            )
         )
     return conversation_id
 
 
 def list_conversations(user_id, mode, limit=30):
-    with connect() as db:
+    with engine().connect() as db:
         rows = db.execute(
-            "SELECT id, title FROM conversations WHERE user_id = ? AND mode = ? "
-            "ORDER BY updated DESC LIMIT ?",
-            (user_id, mode, limit),
-        ).fetchall()
+            select(conversations.c.id, conversations.c.title)
+            .where(conversations.c.user_id == user_id, conversations.c.mode == mode)
+            .order_by(conversations.c.updated.desc())
+            .limit(limit)
+        ).mappings().all()
     return [dict(row) for row in rows]
 
 
 def delete_conversation(user_id, conversation_id):
-    with connect() as db:
+    with engine().begin() as db:
         db.execute(
-            "DELETE FROM conversations WHERE id = ? AND user_id = ?", (conversation_id, user_id)
+            delete(conversations).where(
+                conversations.c.id == conversation_id, conversations.c.user_id == user_id
+            )
         )
 
 
 def load_messages(user_id, conversation_id):
-    with connect() as db:
+    with engine().connect() as db:
         rows = db.execute(
-            "SELECT m.role, m.content, m.sources, m.error FROM messages m "
-            "JOIN conversations c ON c.id = m.conversation_id "
-            "WHERE m.conversation_id = ? AND c.user_id = ? ORDER BY m.id",
-            (conversation_id, user_id),
-        ).fetchall()
+            select(messages.c.role, messages.c.content, messages.c.sources, messages.c.error)
+            .join(conversations, conversations.c.id == messages.c.conversation_id)
+            .where(messages.c.conversation_id == conversation_id, conversations.c.user_id == user_id)
+            .order_by(messages.c.id)
+        ).mappings().all()
     return [
         {
             "role": row["role"],
@@ -176,14 +245,20 @@ def load_messages(user_id, conversation_id):
 
 
 def add_message(user_id, conversation_id, role, content, sources=(), error=False):
-    with connect() as db:
+    with engine().begin() as db:
         owned = db.execute(
-            "UPDATE conversations SET updated = ? WHERE id = ? AND user_id = ?",
-            (time.time(), conversation_id, user_id),
+            update(conversations)
+            .where(conversations.c.id == conversation_id, conversations.c.user_id == user_id)
+            .values(updated=time.time())
         ).rowcount
         if not owned:
             raise PermissionError("That chat belongs to another user.")
         db.execute(
-            "INSERT INTO messages (conversation_id, role, content, sources, error) VALUES (?, ?, ?, ?, ?)",
-            (conversation_id, role, content, json.dumps(list(sources)), int(error)),
+            insert(messages).values(
+                conversation_id=conversation_id,
+                role=role,
+                content=content,
+                sources=json.dumps(list(sources)),
+                error=int(error),
+            )
         )

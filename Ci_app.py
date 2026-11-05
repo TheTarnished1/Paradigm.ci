@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import shutil
 import tempfile
 
 import streamlit as st
@@ -149,11 +148,13 @@ mode = st.session_state.mode
 def load_user_memory():
     """Loads this user's document index once per session. Returns None if they have none."""
     if "user_memory" not in st.session_state:
-        folder = store.user_docs_dir(user_id)
+        index_data = store.load_documents(user_id)
         st.session_state.user_memory = (
-            # Safe to unpickle: the server builds this file itself and users can't upload to it
-            FAISS.load_local(folder, load_embeddings(), allow_dangerous_deserialization=True)
-            if os.path.isdir(folder)
+            # Safe to unpickle: the server builds this data itself and users can't upload it directly
+            FAISS.deserialize_from_bytes(
+                index_data, load_embeddings(), allow_dangerous_deserialization=True
+            )
+            if index_data
             else None
         )
     return st.session_state.user_memory
@@ -169,13 +170,6 @@ def index_uploads(files):
                 f.write(file.getvalue())
             raw_docs.extend(read_pdf(path, source=file.name))
     return build_index(raw_docs, load_embeddings())
-
-
-def save_documents(memory):
-    folder = store.user_docs_dir(user_id)
-    shutil.rmtree(folder, ignore_errors=True)
-    memory.save_local(folder)
-    st.session_state.user_memory = memory
 
 
 def setup_form():
@@ -228,7 +222,12 @@ def setup_form():
         if memory is None:
             st.error("Couldn't find readable text in those PDFs. Scanned pages won't work yet.")
             return
-        save_documents(memory)
+        index_data = memory.serialize_to_bytes()
+        if len(index_data) > store.MAX_INDEX_BYTES:
+            st.error("Those documents are too large to save. Try fewer or smaller PDFs.")
+            return
+        store.save_documents(user_id, index_data)
+        st.session_state.user_memory = memory
         st.session_state.doc_names = [pdf.name for pdf in pdfs]
 
     identity.update(
