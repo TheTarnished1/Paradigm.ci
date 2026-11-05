@@ -1,4 +1,5 @@
 {
+    "made_by": "Pascal",
     "dna_identity": {
         "business_name": "Paradigm.ci",
         "ci_name": "Paradigm",
@@ -22,7 +23,7 @@
         "active_documents": []
     },
     "dna_synapse": {
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-120b",
         "creativity_index": 0.5,
         "memory_window": 5
     }

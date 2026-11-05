@@ -1,10 +1,46 @@
 import os
 import json
 import glob
+import urllib.request
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+
+def read_pdf(path, source=None):
+    """Loads a PDF's pages. source replaces the file path shown in citations."""
+    docs = PyPDFLoader(path).load()
+    if source:
+        for doc in docs:
+            doc.metadata["source"] = source
+    return docs
+
+
+def build_index(raw_docs, embeddings):
+    """Returns a searchable index, or None if the documents have no readable text."""
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    chunks = text_splitter.split_documents(raw_docs)
+    return FAISS.from_documents(chunks, embeddings) if chunks else None
+
+
+def model_status(model, api_key):
+    """Asks Groq whether the model is usable. Returns (ok, message for the status screen)."""
+    request = urllib.request.Request(
+        "https://api.groq.com/openai/v1/models",
+        headers={"Authorization": f"Bearer {api_key}", "User-Agent": "paradigm"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            available = {entry["id"] for entry in json.load(response)["data"]}
+    except (OSError, ValueError, KeyError):
+        return False, "Offline: can't reach the AI service"
+    if model not in available:
+        return False, "Offline: this model is no longer available"
+    return True, "Online"
+
 
 class CISetup:
     def __init__(self, dna_path="client_config.json"):
@@ -45,11 +81,10 @@ class CISetup:
             print("   ❌ No documents to process.")
             return
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-        chunks = text_splitter.split_documents(raw_docs)
-        
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        vector_store = FAISS.from_documents(chunks, embeddings)
+        vector_store = build_index(raw_docs, HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL))
+        if vector_store is None:
+            print("   ❌ No readable text in those documents.")
+            return
         vector_store.save_local("faiss_index")
         print("   ✅ Memory Bank (faiss_index) saved successfully.")
 

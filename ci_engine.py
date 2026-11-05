@@ -74,16 +74,17 @@ class CIEngine:
         DIRECTIVE: {identity['core_directive']}
         
         CONTEXT FROM FILES:
-        {context_text}
-        
+        {{context}}
+
         User Question: {{question}}
         
         Answer:
         """
         
-        prompt_template = PromptTemplate(template=system_prompt, input_variables=["question"])
+        prompt_template = PromptTemplate(template=system_prompt, input_variables=["context", "question"])
         chain = prompt_template | self.synapse | StrOutputParser()
-        answer = chain.invoke({"question": query})
+        # context goes in as a variable: braces in a PDF would break the template otherwise
+        answer = chain.invoke({"context": context_text, "question": query})
         
         return {"result": answer, "source_documents": source_docs}
 

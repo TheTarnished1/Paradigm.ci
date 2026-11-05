@@ -59,19 +59,19 @@ JSON
         "base_personality": "Professional, Concise, Safety-Focused"
     },
     "dna_synapse": {
-        "model": "llama-3.3-70b-versatile"
+        "model": "openai/gpt-oss-120b"
     }
  How to Run
 Step 1: Build the Memory (Optional)
 If you have PDFs in the docs/ folder, run this once to teach the AI:
 
-python setup_tools.py
+python ci_setup_tools.py
 Step 2: Start the Bot
 Run the main engine:
 
 Bash
 
-python slack_bot.py
+python ci_engine.py
 You should see: CI Teammate is online and listening to Slack...
 
 Step 3: Chat in Slack
@@ -80,9 +80,9 @@ Mention: @Bot Help me with...
 DM: Send a direct message to the bot.
 
  Project Structure
-slack_bot.py - The main engine (Connects Slack + AI).
+ci_engine.py - The main engine (Connects Slack + AI).
 
-setup_tools.py - The builder (Reads PDFs and creates the memory).
+ci_setup_tools.py - The builder (Reads PDFs and creates the memory).
 
 client_config.json - The personality settings.
 
@@ -90,4 +90,30 @@ docs/ - Place your PDF training files here.
 
 faiss_index/ - The database created by the setup tool (do not edit manually).
 
+## Deploy for free
 
+The web app runs on Streamlit Community Cloud. Accounts and chats live in Neon Postgres, and document indexes in Neon object storage. Without these settings, the app uses a local SQLite file, which Streamlit Cloud can wipe on restart.
+
+1. Run `neon deploy`, which writes the Neon values to `.env.local`.
+2. Create an app on [Streamlit Community Cloud](https://share.streamlit.io) from this repo, with `Ci_app.py` as the main file.
+3. In the app's **Advanced settings → Secrets**, add your `GROQ_API_KEY`, plus these values from `.env.local`:
+
+```toml
+GROQ_API_KEY = "..."
+DATABASE_URL = "..."
+AWS_ACCESS_KEY_ID = "..."
+AWS_SECRET_ACCESS_KEY = "..."
+AWS_ENDPOINT_URL_S3 = "..."
+AWS_REGION = "..."
+NEON_FUNCTION_HELLO_BASE_URL = "..."
+```
+
+Never commit these values. The tables are created on first run.
+
+## Tests
+
+```bash
+python test_app.py
+```
+
+To run them against real Neon services, create a throwaway branch, write its variables to a file with `neon env pull --branch <name> --file <path>`, and set `TEST_ENV_FILE` to that path. They create test accounts there, so never point this at production.
