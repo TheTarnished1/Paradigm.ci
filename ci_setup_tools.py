@@ -2,16 +2,14 @@ import os
 import json
 import glob
 import urllib.request
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
 
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
 
 def read_pdf(path, source=None):
     """Loads a PDF's pages. source replaces the file path shown in citations."""
+    from langchain_community.document_loaders import PyPDFLoader
+
     docs = PyPDFLoader(path).load()
     if source:
         for doc in docs:
@@ -21,6 +19,9 @@ def read_pdf(path, source=None):
 
 def build_index(raw_docs, embeddings):
     """Returns a searchable index, or None if the documents have no readable text."""
+    from langchain_community.vectorstores import FAISS
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = text_splitter.split_documents(raw_docs)
     return FAISS.from_documents(chunks, embeddings) if chunks else None
@@ -80,6 +81,8 @@ class CISetup:
         if not raw_docs:
             print("   ❌ No documents to process.")
             return
+
+        from langchain_community.embeddings import HuggingFaceEmbeddings
 
         vector_store = build_index(raw_docs, HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL))
         if vector_store is None:

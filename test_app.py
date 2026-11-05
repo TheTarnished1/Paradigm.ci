@@ -5,7 +5,6 @@ import os
 import shutil
 import tempfile
 import time
-from types import SimpleNamespace
 from unittest.mock import patch
 
 data_folder = tempfile.mkdtemp()
@@ -24,8 +23,10 @@ import streamlit as st
 from langchain_community.vectorstores import FAISS
 from langchain_core.embeddings import DeterministicFakeEmbedding
 from sqlalchemy import delete, func, select, update
+from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
 from streamlit.testing.v1 import AppTest
 
+import agent
 import store
 from ci_setup_tools import build_index, model_status, read_pdf
 
@@ -82,20 +83,25 @@ assert store.list_conversations(alice, "assistant") == []
 class FakeChatGroq:
     fail = False
     calls = []
+    models = []
 
     def __init__(self, **kwargs):
-        pass
+        self.model = kwargs.get("model_name")
+
+    def bind_tools(self, tools):
+        return self
 
     def stream(self, chat):
-        FakeChatGroq.calls.append(chat)
+        FakeChatGroq.calls.append(list(chat))
+        FakeChatGroq.models.append(self.model)
         if FakeChatGroq.fail:
             raise RuntimeError("secret-upstream-detail")
-        yield SimpleNamespace(content="Hello ")
-        yield SimpleNamespace(content="there")
+        yield AIMessageChunk(content="Hello ")
+        yield AIMessageChunk(content="there")
 
 
 def start():
-    return AppTest.from_file("Ci_app.py", default_timeout=60).run()
+    return AppTest.from_file("Ci_app.py", default_timeout=300 if real_services else 60).run()
 
 
 def page_text(at):
@@ -134,7 +140,7 @@ with patch("langchain_groq.ChatGroq", FakeChatGroq):
     # Nothing is reachable before logging in
     at = start()
     assert not at.exception, at.exception
-    assert at.title[0].value == "⚡ Paradigm" and not at.chat_input
+    assert at.title[0].value == "Paradigm" and not at.chat_input
 
     # A wrong password is refused
     field(at, "login_username").set_value("alice")
@@ -152,6 +158,7 @@ with patch("langchain_groq.ChatGroq", FakeChatGroq):
     field(at, "signup_confirm").set_value(PASSWORD)
     button(at, "Create account").click().run()
     assert not at.exception, at.exception
+    button(at, "I've saved it").click().run()
     assert at.title[0].value == "Welcome, dana"
     assert not at.chat_input, "home screen asks for a mode first"
 
@@ -228,7 +235,7 @@ with patch("langchain_groq.ChatGroq", FakeChatGroq):
 
     # A user over the limit is told so, and nothing is sent or saved
     erin, _ = store.create_user("erin", PASSWORD)
-    with patch.dict(store.LIMITS, {"message": [(True, 2, store.MINUTE, "Slow down test")]}):
+    with patch.dict(store.PLANS["free"], {"messages_per_minute": 2}):
         at = login("erin")
         button(at, "Open General chat").click().run()
         send(at, "one")
@@ -236,7 +243,7 @@ with patch("langchain_groq.ChatGroq", FakeChatGroq):
         calls_before = len(FakeChatGroq.calls)
         send(at, "three")
         assert len(FakeChatGroq.calls) == calls_before, "a blocked message must not reach Groq"
-        assert at.warning and at.warning[0].value == "Slow down test"
+        assert at.warning and "quickly" in at.warning[0].value
         chat_id = store.list_conversations(erin, "general")[0]["id"]
         assert "three" not in [m["content"] for m in store.load_messages(erin, chat_id)]
 
@@ -247,7 +254,7 @@ with patch("langchain_groq.ChatGroq", FakeChatGroq):
         assert not at.warning
 
     # A limit for everyone applies across users
-    with patch.dict(store.LIMITS, {"message": [(False, 1, store.MINUTE, "Everyone limit test")]}):
+    with patch.dict(store.LIMITS, {"model_call": [(False, 1, store.MINUTE, "Everyone limit test")]}):
         at = login("bob")
         button(at, "Open General chat").click().run()
         send(at, "blocked")
@@ -265,6 +272,7 @@ with patch("langchain_groq.ChatGroq", FakeChatGroq):
         assert at.error and "Signup limit test" not in at.error[0].value, "a bad name isn't counted"
         field(at, "signup_username").set_value("frank")
         button(at, "Create account").click().run()
+        button(at, "I've saved it").click().run()
         assert at.title[0].value == "Welcome, frank"
         at = start()
         field(at, "signup_username").set_value("grace")
@@ -273,6 +281,214 @@ with patch("langchain_groq.ChatGroq", FakeChatGroq):
         button(at, "Create account").click().run()
         assert at.error[0].value == "Signup limit test"
         assert store.verify_user("grace", PASSWORD) is None
+
+# --- Staying logged in ---
+token = store.create_session(alice)
+assert store.user_from_session(token) == (alice, "alice")
+assert store.user_from_session("made-up-token") is None
+with store.engine().connect() as db:
+    saved = db.execute(select(store.sessions.c.token_hash)).scalars().all()
+assert token not in saved, "login tokens must be stored hashed"
+store.end_session(token)
+assert store.user_from_session(token) is None, "logging out must end the session"
+token = store.create_session(alice)
+with store.engine().begin() as db:
+    db.execute(update(store.sessions).values(expires=time.time() - 1))
+assert store.user_from_session(token) is None, "expired sessions must stop working"
+
+# --- Password recovery ---
+ivan, _ = store.create_user("ivan", PASSWORD)
+session = store.create_session(ivan)
+code = store.new_recovery_code(ivan)
+assert store.reset_password("ivan", "wrong-code", "new-password-1") is not None
+assert store.reset_password("nobody", code, "new-password-1") is not None
+assert store.reset_password("alice", code, "new-password-1") is not None, "codes belong to one user"
+assert store.reset_password("ivan", code, "short") is not None
+assert store.verify_user("ivan", PASSWORD), "failed attempts must not change the password"
+assert store.reset_password("IVAN", code, "new-password-1") is None
+assert store.verify_user("ivan", PASSWORD) is None and store.verify_user("ivan", "new-password-1")
+assert store.user_from_session(session) is None, "a reset must log out other sessions"
+assert store.reset_password("ivan", code, "new-password-2") is not None, "codes only work once"
+old_code = store.new_recovery_code(ivan)
+newer_code = store.new_recovery_code(ivan)
+assert store.reset_password("ivan", old_code, "new-password-3") is not None, "a new code replaces the old"
+assert store.reset_password("ivan", newer_code, "new-password-3") is None
+
+# --- Export and deletion ---
+jo, _ = store.create_user("joan", PASSWORD)
+store.save_setup(jo, {"ci_name": "JoBot"}, ["jo.pdf"])
+jo_chat = store.create_conversation(jo, "general", "Jo chat")
+store.add_message(jo, jo_chat, "user", "jo private")
+store.record_usage("message", jo)
+store.save_documents(jo, b"jo documents")
+store.create_session(jo)
+store.new_recovery_code(jo)
+store.set_plan("joan", "paid")
+exported = store.export_user_data(jo)
+assert exported["username"] == "joan" and exported["chats"][0]["messages"][0]["content"] == "jo private"
+assert "password_hash" not in json.dumps(exported) and "salt" not in exported
+assert "jo private" not in json.dumps(store.export_user_data(alice)), "exports hold one user's data"
+assert store.delete_account(jo, "wrong-password") is False
+assert store.verify_user("joan", PASSWORD), "a wrong password must not delete anything"
+assert store.delete_account(jo, PASSWORD) is True
+assert store.verify_user("joan", PASSWORD) is None and store.load_documents(jo) is None
+with store.engine().connect() as db:
+    for table in (store.conversations, store.sessions, store.recovery_codes, store.plans, store.usage):
+        left = db.execute(select(func.count()).select_from(table).where(table.c.user_id == jo)).scalar()
+        assert left == 0, f"{table.name} kept data after deletion"
+    assert not db.execute(select(store.messages).where(store.messages.c.conversation_id == jo_chat)).all()
+assert store.verify_user("alice", PASSWORD), "deleting one account must not touch another"
+
+with patch("langchain_groq.ChatGroq", FakeChatGroq):
+    # Signing up shows a recovery code once, and it really works
+    at = start()
+    field(at, "signup_username").set_value("kay")
+    field(at, "signup_password").set_value(PASSWORD)
+    field(at, "signup_confirm").set_value(PASSWORD)
+    button(at, "Create account").click().run()
+    assert at.warning and at.code, "the recovery code must be shown"
+    shown_code = at.code[0].value
+    button(at, "I've saved it").click().run()
+    assert not at.code and at.title[0].value == "Welcome, kay"
+    at = start()
+    field(at, "reset_username").set_value("kay")
+    field(at, "reset_code").set_value(shown_code)
+    field(at, "reset_password").set_value("kays-new-password")
+    button(at, "Reset password").click().run()
+    assert at.success and not at.error
+    assert store.verify_user("kay", "kays-new-password")
+
+# --- Plans ---
+with patch("langchain_groq.ChatGroq", FakeChatGroq):
+    hana, _ = store.create_user("hana", PASSWORD)
+    assert store.get_plan(hana) == "free", "new users start on Free"
+    assert store.set_plan("nobody", "paid") is False and store.set_plan("hana", "gold") is False
+    paid_only = "qwen/qwen3.8-27b"
+
+    # Free users aren't offered Paid models
+    at = login("hana")
+    button(at, "Open General chat").click().run()
+    assert "Qwen 3.8" not in at.selectbox[0].options
+    assert len(at.selectbox[0].options) == 2
+
+    # Paid users can choose it
+    assert store.set_plan("HANA", "paid")
+    assert store.get_plan(hana) == "paid"
+    at = login("hana")
+    button(at, "Open General chat").click().run()
+    at.selectbox[0].select("Qwen 3.8").run()
+    send(at, "use the paid model")
+    assert FakeChatGroq.models[-1] == paid_only
+
+    # Moving back to Free applies at the next message, even in an open session
+    assert store.set_plan("hana", "free")
+    send(at, "after downgrade")
+    assert FakeChatGroq.models[-1] != paid_only, "a downgrade must apply straight away"
+
+    # Per-day limits follow the plan
+    with patch.dict(store.PLANS["free"], {"messages_per_day": 1}):
+        assert "limit of 1" in store.limit_message("message", hana, plan="free")
+        assert store.limit_message("message", hana, plan="paid") is None
+
+
+# --- Tool calling ---
+def tool_call(name, query, call_id="call_1"):
+    return AIMessageChunk(
+        content="",
+        tool_call_chunks=[{"name": name, "args": json.dumps({"query": query}), "id": call_id, "index": 0}],
+    )
+
+
+class ScriptedModel:
+    """Plays back one response per model call. An exception in the script is raised."""
+
+    def __init__(self, *script):
+        self.script = list(script)
+        self.tools_offered = []
+        self.next_has_tools = False
+
+    def bind_tools(self, tools):
+        self.next_has_tools = True
+        return self
+
+    def stream(self, chat):
+        self.tools_offered.append(self.next_has_tools)
+        self.next_has_tools = False
+        step = self.script.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        yield from step
+
+
+def turn(llm, tools, limit=2):
+    chat = [HumanMessage(content="question")]
+    return agent.run_turn(llm, chat, tools, limit, lambda stream: "".join(stream)), chat
+
+
+def tool_results(chat):
+    return [m.content for m in chat if isinstance(m, ToolMessage)]
+
+
+web_hits = [{"title": "Result [title]", "href": "https://example.com/page", "body": "A useful fact"}]
+with patch.object(agent, "DDGS") as ddgs:
+    search = ddgs.return_value.text
+    search.return_value = web_hits
+    tools, sources = agent.make_tools()
+    assert [t.name for t in tools] == ["web_search"]
+
+    # A tool result goes back to the model, and the source is kept for the user
+    llm = ScriptedModel([tool_call("web_search", "python")], [AIMessageChunk(content="The answer")])
+    reply, chat = turn(llm, tools)
+    assert reply == "The answer" and "A useful fact" in tool_results(chat)[0]
+    assert sources == ["Result title (example.com)"], sources
+
+    # The plan's limit stops further tool calls, and the model still answers
+    search.reset_mock()
+    llm = ScriptedModel([tool_call("web_search", "a")], [tool_call("web_search", "b")], [AIMessageChunk(content="Done")])
+    reply, chat = turn(llm, tools, limit=2)
+    assert reply == "Done" and llm.tools_offered == [True, True, False], llm.tools_offered
+    assert any("no more tool calls" in str(m.content) for m in chat), "the model is told to finish"
+    assert search.call_count == 2
+
+    # Several calls in one response can't get past the limit
+    search.reset_mock()
+    many = AIMessageChunk(
+        content="",
+        tool_call_chunks=[
+            {"name": "web_search", "args": json.dumps({"query": str(i)}), "id": f"c{i}", "index": i} for i in range(5)
+        ],
+    )
+    llm = ScriptedModel([many], [AIMessageChunk(content="Done")])
+    reply, chat = turn(llm, tools, limit=2)
+    assert search.call_count == 2 and reply == "Done"
+    assert len(tool_results(chat)) == 5, "every call needs an answer"
+
+    # A failing tool is reported to the model, without details
+    search.side_effect = RuntimeError("secret-search-detail")
+    llm = ScriptedModel([tool_call("web_search", "x")], [AIMessageChunk(content="Sorry")])
+    reply, chat = turn(llm, tools)
+    assert reply == "Sorry" and "secret-search-detail" not in tool_results(chat)[0]
+
+# A made-up tool name doesn't crash the reply
+llm = ScriptedModel([tool_call("delete_everything", "x")], [AIMessageChunk(content="Fine")])
+reply, chat = turn(llm, tools)
+assert reply == "Fine" and "no tool called" in tool_results(chat)[0]
+
+# A bad tool request falls back to answering without tools
+llm = ScriptedModel(RuntimeError("tool_use_failed"), [AIMessageChunk(content="No tools needed")])
+assert turn(llm, tools)[0] == "No tools needed" and llm.tools_offered == [True, False]
+
+# A failure with no tools in play still reaches the user's error message
+try:
+    turn(ScriptedModel(RuntimeError("down")), [])
+    raise AssertionError("the failure was swallowed")
+except RuntimeError:
+    pass
+
+# Document search only appears when documents exist, and its sources are kept
+tools, sources = agent.make_tools(lambda query: ("Refund text", ["policy.pdf (page 1)"]))
+assert [t.name for t in tools] == ["web_search", "search_documents"]
+assert tools[1].invoke({"query": "refund"}) == "Refund text" and sources == ["policy.pdf (page 1)"]
 
 # Upload limits count per user, and old usage gets cleaned up and stops counting
 with patch.dict(store.LIMITS, {"upload": [(True, 1, store.DAY, "Upload limit test")]}):
