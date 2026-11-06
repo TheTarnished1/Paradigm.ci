@@ -363,7 +363,7 @@ with patch.object(_chat, "client", lambda: NS(models=NS(list=lambda: NS(data=[])
     assert alice.get("/api/status").json()["AI service"] is False, "a retired model shows as offline"
 
 # --- Writing and follow-ups ---
-# These sections send many messages quickly, so the per-minute limits are lifted
+# The rest sends many messages quickly, so the per-minute limits are lifted
 quick = patch.dict(store.LIMITS, {"model_call": [(False, 1000, store.MINUTE, "x")]})
 quick_plan = patch.dict(store.PLANS["free"], {"messages_per_minute": 1000})
 quick.start()
@@ -470,8 +470,6 @@ with patch.object(_chat, "DDGS") as ddgs:
 with patch.dict(store.LIMITS, {"research": [(True, 0, store.DAY, "Research limit")]}):
     assert send(lena, "more", research=True)[0].json()["detail"] == "Research limit"
     assert send(lena, "normal")[0].status_code == 200, "the research limit only applies to research"
-quick_plan.stop()
-quick.stop()
 
 # --- Export and deletion ---
 kim = sign_up("kim")
@@ -496,4 +494,6 @@ with store.engine().connect() as db:
         assert left == 0, f"{table.name} kept data after deletion"
 assert alice.get("/api/me").status_code == 200, "deleting one account doesn't touch another"
 
+quick_plan.stop()
+quick.stop()
 print("ok")
