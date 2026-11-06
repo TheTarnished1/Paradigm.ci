@@ -555,6 +555,9 @@ a.source:hover { border-color: var(--text); color: var(--text); }
 .edit-box textarea { background: none; border: 0; font: inherit; line-height: 1.55; outline: none; resize: vertical; }
 .edit-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
 
+.versions { align-items: center; display: inline-flex; gap: 0.1rem; margin-right: 0.25rem; }
+.versions .small { font-variant-numeric: tabular-nums; min-width: 2.2rem; text-align: center; }
+
 /* Suggested follow-ups */
 .followups { display: flex; flex-direction: column; align-items: flex-start; gap: 0.45rem; margin: -0.5rem 0 0 2.6rem; }
 .followup { animation: rise 260ms var(--ease) both; border-radius: 999px; font-size: 0.9rem; padding: 0.45rem 0.95rem; text-align: left; transition: border-color 140ms var(--ease), transform 140ms var(--ease); }

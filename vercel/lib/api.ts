@@ -26,8 +26,10 @@ export type Message = {
   error: boolean;
   /** Suggested next questions, only for replies written in this visit */
   followups?: string[];
-  /** Shown here but never saved, like a reply that was stopped part way */
-  local?: boolean;
+  id?: number;
+  /** How many versions a regenerated reply has, and which one is shown */
+  versions?: number;
+  version?: number;
 };
 
 export type ChatSummary = { id: string; title: string; updated: number; pinned: boolean };
@@ -42,6 +44,8 @@ export type ChatRequest = {
   /** Editing or regenerating keeps this many saved messages and replaces the rest */
   keep?: number;
   research?: boolean;
+  /** Writes a new version of the last reply, keeping the old one */
+  regenerate?: boolean;
   temporary?: boolean;
   history?: { role: Message["role"]; content: string }[];
 };
@@ -50,7 +54,7 @@ export type ChatEvent =
   | { type: "conversation"; id: string }
   | { type: "text"; text: string }
   | { type: "status"; text: string }
-  | { type: "done"; sources: Source[]; followups?: string[] }
+  | { type: "done"; sources: Source[]; followups?: string[]; id?: number | null; versions?: number; version?: number }
   | { type: "error"; text: string };
 
 export class ApiError extends Error {

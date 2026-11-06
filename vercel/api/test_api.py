@@ -1,5 +1,6 @@
 # Run with: DATABASE_URL=<an empty, throwaway Postgres database> python api/test_api.py
 # It creates test accounts, so never point it at production. No Groq or web search calls happen.
+import asyncio
 import io
 import json
 import os
@@ -470,6 +471,72 @@ with patch.object(_chat, "DDGS") as ddgs:
 with patch.dict(store.LIMITS, {"research": [(True, 0, store.DAY, "Research limit")]}):
     assert send(lena, "more", research=True)[0].json()["detail"] == "Research limit"
     assert send(lena, "normal")[0].status_code == 200, "the research limit only applies to research"
+
+# --- Reply versions ---
+response, _ = send(lena, "Name a colour", FakeGroq([word_chunk("Red")]))
+colour = events(response)[0]["id"]
+response, groq = send(lena, "ignored", FakeGroq([word_chunk("Blue")]), conversation_id=colour, regenerate=True)
+done = events(response)[-1]
+assert done["versions"] == 2 and done["version"] == 1, done
+assert [m["content"] for m in groq.calls[0]["messages"][1:]] == ["Name a colour"], "the old reply isn't sent back"
+saved = lena.get(f"/api/conversations/{colour}").json()
+assert [m["content"] for m in saved] == ["Name a colour", "Blue"], saved
+assert saved[-1]["versions"] == 2 and saved[-1]["version"] == 1 and done["id"] == saved[-1]["id"]
+reply_id = saved[-1]["id"]
+picked = lena.post(f"/api/messages/{reply_id}/version", json={"index": 0})
+assert picked.status_code == 200 and picked.json()["content"] == "Red" and picked.json()["version"] == 0
+assert lena.get(f"/api/conversations/{colour}").json()[-1]["content"] == "Red", "the chosen version is kept"
+assert lena.post(f"/api/messages/{reply_id}/version", json={"index": 2}).status_code == 404
+assert bob.post(f"/api/messages/{reply_id}/version", json={"index": 1}).status_code == 404, "versions belong to one user"
+assert send(bob, "x", conversation_id=colour, regenerate=True)[0].status_code == 404
+_, groq = send(lena, "Why that one?", conversation_id=colour)
+assert "Red" in json.dumps(groq.calls[0]["messages"]) and "Blue" not in json.dumps(groq.calls[0]["messages"])
+assert lena.post(f"/api/messages/{reply_id}/version", json={"index": 1}).status_code == 404, "only the last reply switches"
+
+# A failed reply is replaced rather than kept as a version
+send(lena, "This fails", FakeGroq(RuntimeError("x")), conversation_id=colour)
+response, _ = send(lena, "x", FakeGroq([word_chunk("Works")]), conversation_id=colour, regenerate=True)
+assert "versions" not in events(response)[-1]
+assert lena.get(f"/api/conversations/{colour}").json()[-1]["content"] == "Works"
+waiting = store.create_conversation(lena_id, "general", "Only a question")
+store.add_message(lena_id, waiting, "user", "Only a question")
+assert send(lena, "x", conversation_id=waiting, regenerate=True)[0].status_code == 409
+
+# Editing an earlier message removes the versions after it
+send(lena, "x", FakeGroq([word_chunk("Green")]), conversation_id=colour, regenerate=True)
+send(lena, "Name a shape", FakeGroq([word_chunk("Circle")]), conversation_id=colour, keep=0)
+with store.engine().connect() as db:
+    assert db.execute(select(func.count()).select_from(store.reply_versions).where(store.reply_versions.c.message_id == reply_id)).scalar() == 0
+
+# --- Stopped replies are kept ---
+async def stop_after(stream, count):
+    """Reads `count` events, then stops reading, like a browser when Stop is pressed."""
+    seen = [json.loads(await stream.__anext__()) for _ in range(count)]
+    await stream.aclose()
+    return seen
+
+
+lena_user = (lena_id, "lena")
+# Saving as it streams is turned off here, so only the save on stopping is tested
+with patch.object(index, "StreamingResponse", lambda content, **options: content), patch.object(index, "SAVE_EVERY_SECONDS", 1e9):
+    with patch.object(_chat, "client", lambda: FakeGroq([word_chunk("Partial "), word_chunk("answer"), word_chunk(" more")])):
+        stream = index.chat(index.ChatRequest(message="Long question", mode="general"), lena_user)
+        stopped = asyncio.run(stop_after(stream, 3))[0]["id"]
+    # The stopped reply is saved in a background thread, so give it a moment
+    for _ in range(100):
+        last = lena.get(f"/api/conversations/{stopped}").json()[-1]
+        if not last["error"]:
+            break
+        time.sleep(0.1)
+    assert last["content"] == "Partial answer" and not last["error"], last
+    with patch.object(_chat, "client", lambda: FakeGroq([word_chunk("never read")])):
+        stream = index.chat(index.ChatRequest(message="Stop early", mode="general", conversation_id=stopped), lena_user)
+        asyncio.run(stop_after(stream, 1))
+    last = lena.get(f"/api/conversations/{stopped}").json()[-1]
+    assert last["content"] == index.STOPPED and last["error"], "stopping before any text still leaves a record"
+_, groq = send(lena, "Continue", conversation_id=stopped)
+sent = json.dumps(groq.calls[0]["messages"])
+assert "Partial answer" in sent and index.STOPPED not in sent, "partial replies are context, empty stops aren't"
 
 # --- Export and deletion ---
 kim = sign_up("kim")

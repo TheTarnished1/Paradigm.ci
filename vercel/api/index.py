@@ -1,15 +1,19 @@
 """Paradigm's API. Vercel sends every /api request here."""
+import asyncio
 import io
 import json
 import logging
 import os
 import sys
+import threading
+import time
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
@@ -21,6 +25,9 @@ MAX_PDFS = 5
 MAX_UPLOAD_BYTES = 4 * 1024 * 1024  # Vercel rejects request bodies over about 4.5 MB
 CHUNK_CHARS = 1000
 HISTORY_MESSAGES = 10
+SAVE_EVERY_SECONDS = 1
+STOPPED = "Stopped."
+FAILED = "Sorry, I couldn't answer that. Try again."
 DEFAULT_IDENTITY = {
     "ci_name": "Paradigm",
     "business_name": "",
@@ -80,7 +87,13 @@ class ChatRequest(BaseModel):
     research: bool = False
     # Temporary chats save nothing, so the browser sends the earlier messages itself
     temporary: bool = False
+    # Regenerating keeps the last reply as a version you can switch back to
+    regenerate: bool = False
     history: list[PastMessage] = Field(default=[], max_length=HISTORY_MESSAGES)
+
+
+class VersionChoice(BaseModel):
+    index: int = Field(ge=0, le=1000)
 
 
 class ChatUpdate(BaseModel):
@@ -298,39 +311,45 @@ def forget_all(user=Depends(current_user)):
     return {"ok": True}
 
 
-def reply_stream(user_id, body, plan_name, model, conversation_id):
-    """Streams newline-separated JSON events to the browser, and saves the reply when it's done."""
+async def reply_stream(user_id, body, question, history, plan_name, model, conversation_id=None, reply=None):
+    """Streams newline-separated JSON events to the browser.
+
+    `reply` is (message id, version id or None, number of versions) for a saved chat. The reply is saved as it
+    streams, and again if the browser stops reading, so a reply that's stopped part way keeps what was written.
+    Database and Groq calls run in worker threads, so the stream itself can notice when the browser goes away.
+    """
 
     def event(kind, **fields):
         return json.dumps({"type": kind, **fields}) + "\n"
 
-    if conversation_id:
-        yield event("conversation", id=conversation_id)
-    reply = ""
-    try:
-        if body.temporary:
-            history, saved_memories, remember = body.history, [], None
-        else:
-            history = [
-                PastMessage(role=m["role"], content=m["content"])
-                for m in store.load_messages(user_id, conversation_id)
-                if not m["error"]
-            ][-HISTORY_MESSAGES:]
-            store.add_message(user_id, conversation_id, "user", body.message)
-            saved_memories = [memory["content"] for memory in store.list_memories(user_id)]
-            remember = lambda fact: store.add_memory(user_id, fact)
+    def save(content, sources=(), error=False):
+        if reply:
+            store.update_reply(reply[0], content, sources, error, reply[1])
+
+    def save_quietly(content, sources):
+        try:
+            save(content, sources)
+        except Exception:
+            logging.warning("Couldn't save a stopped reply")
+
+    def partial():
+        return _chat.split_followups(_chat.clean_reply(text))[0].strip()
+
+    def prepare():
         identity, documents = store.load_setup(user_id)
         has_documents = body.mode == "assistant" and bool(documents)
-        context, sources = store.search_documents(user_id, body.message) if has_documents else ("", [])
-        prompt = _chat.system_prompt(body.mode, identity or DEFAULT_IDENTITY, context, saved_memories, body.research)
+        context, found = store.search_documents(user_id, question) if has_documents else ("", [])
+        memories = [] if body.temporary else [memory["content"] for memory in store.list_memories(user_id)]
+        remember = None if body.temporary else lambda fact: store.add_memory(user_id, fact)
+        prompt = _chat.system_prompt(body.mode, identity or DEFAULT_IDENTITY, context, memories, body.research)
         chat = [
             {"role": "system", "content": prompt},
             *({"role": past.role, "content": past.content} for past in history),
-            {"role": "user", "content": body.message},
+            {"role": "user", "content": question},
         ]
         search = (lambda query: store.search_documents(user_id, query)) if has_documents else None
         plan = store.PLANS[plan_name]
-        for kind, value in _chat.run_turn(
+        turn = _chat.run_turn(
             _chat.client(),
             model,
             chat,
@@ -338,27 +357,43 @@ def reply_stream(user_id, body, plan_name, model, conversation_id):
             search,
             remember,
             before_model_call=lambda: store.record_usage("model_call"),
-        ):
+        )
+        return turn, found
+
+    if conversation_id:
+        yield event("conversation", id=conversation_id)
+    text, sources, saved_at = "", [], time.monotonic()
+    try:
+        turn, sources = await run_in_threadpool(prepare)
+        while (step := await run_in_threadpool(next, turn, None)) is not None:
+            kind, value = step
             if kind == "text":
-                reply += value
+                text += value
                 yield event("text", text=value)
+                if time.monotonic() - saved_at >= SAVE_EVERY_SECONDS:
+                    await run_in_threadpool(save, partial(), sources)
+                    saved_at = time.monotonic()
             elif kind == "status":
                 yield event("status", text=value)
             else:
                 sources += [source for source in value if source not in sources]
-        reply, followups = _chat.split_followups(_chat.clean_reply(reply))
-        if conversation_id:
-            store.add_message(user_id, conversation_id, "assistant", reply, sources=sources)
-        yield event("done", sources=sources, followups=followups)
+        content, followups = _chat.split_followups(_chat.clean_reply(text))
+        await run_in_threadpool(save, content, sources)
+        versions = {"versions": reply[2], "version": reply[2] - 1} if reply and reply[2] > 1 else {}
+        yield event("done", sources=sources, followups=followups, id=reply[0] if reply else None, **versions)
+    except (asyncio.CancelledError, GeneratorExit):
+        # The browser stopped reading, usually because the person pressed Stop. This can run while the server is
+        # tidying up, so the save runs in its own thread instead of holding up other requests.
+        if partial():
+            threading.Thread(target=save_quietly, args=(partial(), list(sources)), daemon=True).start()
+        raise
     except Exception as error:
         # Only the type is logged, because details can include user content
         logging.error("Chat request failed: %s", type(error).__name__)
-        message = "Sorry, I couldn't answer that. Try again."
         try:
-            if conversation_id:
-                store.add_message(user_id, conversation_id, "assistant", message, error=True)
+            save(FAILED, error=True)
         finally:
-            yield event("error", text=message)
+            yield event("error", text=FAILED)
 
 
 @app.post("/api/chat")
@@ -377,18 +412,48 @@ def chat(body: ChatRequest, user=Depends(current_user)):
     conversation_id = None if body.temporary else body.conversation_id
     if conversation_id and not store.conversation_exists(user[0], conversation_id):
         raise HTTPException(status_code=404, detail="That chat doesn't exist.")
+
+    question, reply = body.message, None
+    if body.temporary:
+        history = body.history
+    elif body.regenerate:
+        started = conversation_id and store.start_regenerate(user[0], conversation_id, STOPPED)
+        if not started:
+            raise HTTPException(status_code=409, detail="There's no reply to regenerate.")
+        question = started["question"]
+        history = store.load_messages(user[0], conversation_id)[:-2]
+        reply = (started["reply_id"], started["version_id"], started["versions"])
+    else:
+        if conversation_id and body.keep is not None:
+            store.truncate_messages(user[0], conversation_id, body.keep)
+        if not conversation_id:
+            conversation_id = store.create_conversation(user[0], body.mode, body.message[:60])
+        history = store.load_messages(user[0], conversation_id)
+        store.add_message(user[0], conversation_id, "user", question)
+        # The reply exists from the start, so stopping before any text still leaves a record of it
+        reply = (store.add_message(user[0], conversation_id, "assistant", STOPPED, error=True), None, 1)
+    if not body.temporary:
+        history = [
+            PastMessage(role=past["role"], content=past["content"]) for past in history if not past["error"]
+        ][-HISTORY_MESSAGES:]
+
     store.record_usage("message", user[0])
     if body.research:
         store.record_usage("research", user[0])
-    if conversation_id and body.keep is not None:
-        store.truncate_messages(user[0], conversation_id, body.keep)
-    elif not conversation_id and not body.temporary:
-        conversation_id = store.create_conversation(user[0], body.mode, body.message[:60])
     return StreamingResponse(
-        reply_stream(user[0], body, plan_name, body.model or allowed[0], conversation_id),
+        reply_stream(user[0], body, question, history, plan_name, body.model or allowed[0], conversation_id, reply),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/messages/{message_id}/version")
+def choose_version(message_id: int, body: VersionChoice, user=Depends(current_user)):
+    """Shows another version of the last reply. Earlier replies can't change, because later messages build on them."""
+    chosen = store.select_version(user[0], message_id, body.index)
+    if chosen is None:
+        raise HTTPException(status_code=404, detail="That version isn't available.")
+    return chosen
 
 
 @app.get("/api/status")

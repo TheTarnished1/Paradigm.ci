@@ -3,6 +3,8 @@
 import {
   ArrowUp,
   Check,
+  ChevronLeft,
+  ChevronRight,
   FileText,
   Globe,
   Lightbulb,
@@ -288,13 +290,8 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
     abortRef.current?.abort();
   }
 
-  /** How many saved messages come before this one. Replies stopped part way are only shown here, never saved. */
-  function savedBefore(index: number) {
-    return messages.slice(0, index).filter((message) => !message.local).length;
-  }
-
   /** Sends a message. With `from`, everything from that message on is replaced, for editing and regenerating. */
-  async function send(text: string, from?: number) {
+  async function send(text: string, from?: number, regenerate = false) {
     const message = text.trim();
     if (!message || sending || !mode) return;
     recognitionRef.current?.stop();
@@ -322,11 +319,13 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
     if (temporary) {
       body.temporary = true;
       body.history = before
-        .filter((past) => !past.error && !past.local)
+        .filter((past) => !past.error)
         .slice(-HISTORY_MESSAGES)
         .map((past) => ({ role: past.role, content: past.content.slice(0, 8000) }));
+    } else if (regenerate) {
+      body.regenerate = true;
     } else if (from !== undefined && chatId) {
-      body.keep = savedBefore(from);
+      body.keep = from;
     }
 
     try {
@@ -339,7 +338,14 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
             setStatus(null);
             updateReply((reply) => ({ ...reply, content: reply.content + event.text }));
           } else if (event.type === "done") {
-            updateReply((reply) => ({ ...reply, sources: event.sources, followups: event.followups }));
+            updateReply((reply) => ({
+              ...reply,
+              sources: event.sources,
+              followups: event.followups,
+              id: event.id ?? undefined,
+              versions: event.versions,
+              version: event.version,
+            }));
           } else if (event.type === "error") {
             updateReply((reply) => ({ ...reply, content: event.text, error: true }));
           }
@@ -347,7 +353,8 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
         controller.signal,
       );
       if (controller.signal.aborted) {
-        updateReply((reply) => ({ ...reply, content: reply.content || "Stopped.", error: !reply.content, local: true }));
+        // The server saves what was written so far, or notes that it stopped
+        updateReply((reply) => (reply.content ? reply : { ...reply, content: "Stopped.", error: true }));
       }
       if (!temporary) loadChats(mode);
     } catch (error) {
@@ -365,7 +372,21 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
 
   function regenerate(replyIndex: number) {
     const question = messages[replyIndex - 1];
-    if (question?.role === "user") send(question.content, replyIndex - 1);
+    // Saved chats keep the old reply as a version. Temporary chats have nothing saved to keep.
+    if (question?.role === "user") send(question.content, replyIndex - 1, !temporary);
+  }
+
+  async function showVersion(index: number, id: number, version: number) {
+    try {
+      const chosen = await api<Pick<Message, "content" | "sources" | "error" | "versions" | "version">>(
+        `messages/${id}/version`,
+        "POST",
+        { index: version },
+      );
+      setMessages((list) => list.map((message, at) => (at === index ? { ...message, ...chosen, followups: [] } : message)));
+    } catch (error) {
+      fail(error);
+    }
   }
 
   function submit(event: FormEvent) {
@@ -670,8 +691,30 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
                     );
                   }
                   const finished = !(sending && index === lastIndex);
+                  const { id, versions = 0, version = 0 } = message;
                   const actions = (text: string) => (
                     <>
+                      {index === lastIndex && id && versions > 1 && (
+                        <span className="versions" role="group" aria-label="Reply versions">
+                          <button
+                            className="icon-button small"
+                            onClick={() => showVersion(index, id, version - 1)}
+                            disabled={version === 0}
+                            aria-label="Previous version"
+                          >
+                            <ChevronLeft size={16} />
+                          </button>
+                          <span className="small muted">{version + 1}/{versions}</span>
+                          <button
+                            className="icon-button small"
+                            onClick={() => showVersion(index, id, version + 1)}
+                            disabled={version === versions - 1}
+                            aria-label="Next version"
+                          >
+                            <ChevronRight size={16} />
+                          </button>
+                        </span>
+                      )}
                       {!message.error && text && <CopyButton text={text} label="Copy reply" />}
                       {!message.error && text && <SpeakButton text={text} />}
                       {index === lastIndex && (
