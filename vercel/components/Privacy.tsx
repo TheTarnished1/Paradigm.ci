@@ -1,4 +1,4 @@
-export const CREDIT = "Made by Pascal";
+export const CREDIT = `© ${new Date().getFullYear()} Yves Xavier`;
 
 export function PrivacyNotice() {
   return (
