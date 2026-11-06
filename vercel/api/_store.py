@@ -177,6 +177,17 @@ pins = Table(
     metadata,
     Column("conversation_id", String(32), ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True),
 )
+# Every version of a regenerated reply. The messages row holds a copy of the selected one.
+reply_versions = Table(
+    "reply_versions",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("message_id", Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("content", Text, nullable=False),
+    Column("sources", Text, nullable=False),
+    Column("error", Integer, nullable=False),
+    Column("selected", Integer, nullable=False),
+)
 # A share is a snapshot, so later messages in the chat never appear on the public page
 shares = Table(
     "shares",
@@ -546,15 +557,22 @@ def delete_conversation(user_id, conversation_id):
 
 
 def load_messages(user_id, conversation_id):
+    """The last reply also says how many versions it has, and which one is shown."""
     with engine().connect() as db:
         rows = db.execute(
-            select(messages.c.role, messages.c.content, messages.c.sources, messages.c.error)
+            select(messages.c.id, messages.c.role, messages.c.content, messages.c.sources, messages.c.error)
             .join(conversations, conversations.c.id == messages.c.conversation_id)
             .where(messages.c.conversation_id == conversation_id, conversations.c.user_id == user_id)
             .order_by(messages.c.id)
         ).mappings().all()
-    return [
+        chosen = []
+        if rows and rows[-1]["role"] == "assistant":
+            chosen = db.execute(
+                select(reply_versions.c.selected).where(reply_versions.c.message_id == rows[-1]["id"]).order_by(reply_versions.c.id)
+            ).scalars().all()
+    loaded = [
         {
+            "id": row["id"],
             "role": row["role"],
             "content": row["content"],
             "sources": json.loads(row["sources"]),
@@ -562,6 +580,92 @@ def load_messages(user_id, conversation_id):
         }
         for row in rows
     ]
+    if len(chosen) > 1:
+        loaded[-1].update(versions=len(chosen), version=chosen.index(1) if 1 in chosen else len(chosen) - 1)
+    return loaded
+
+
+def update_reply(message_id, content, sources=(), error=False, version_id=None):
+    """Saves a reply as it streams in, so stopping part way keeps what was written."""
+    values = {"content": content, "sources": json.dumps(list(sources)), "error": int(error)}
+    with engine().begin() as db:
+        db.execute(update(messages).where(messages.c.id == message_id).values(**values))
+        if version_id:
+            db.execute(update(reply_versions).where(reply_versions.c.id == version_id).values(**values))
+
+
+def start_regenerate(user_id, conversation_id, placeholder):
+    """Keeps the last reply as a version and starts a new one in its place.
+
+    Returns {"question", "reply_id", "version_id", "versions"}, or None if the chat doesn't end with a question and reply.
+    """
+    with engine().begin() as db:
+        owned = db.execute(
+            update(conversations)
+            .where(conversations.c.id == conversation_id, conversations.c.user_id == user_id)
+            .values(updated=time.time())
+        ).rowcount
+        if not owned:
+            return None
+        last = db.execute(
+            select(messages.c.id, messages.c.role, messages.c.content, messages.c.sources, messages.c.error)
+            .where(messages.c.conversation_id == conversation_id)
+            .order_by(messages.c.id.desc())
+            .limit(2)
+        ).all()
+        if len(last) < 2 or last[0].role != "assistant" or last[1].role != "user":
+            return None
+        reply, question = last
+        count = db.execute(select(func.count()).select_from(reply_versions).where(reply_versions.c.message_id == reply.id)).scalar()
+        # The first regeneration keeps the original reply, unless it was an error
+        if count == 0 and not reply.error:
+            db.execute(
+                insert(reply_versions).values(
+                    message_id=reply.id, content=reply.content, sources=reply.sources, error=0, selected=0
+                )
+            )
+            count = 1
+        db.execute(update(reply_versions).where(reply_versions.c.message_id == reply.id).values(selected=0))
+        version_id = db.execute(
+            insert(reply_versions)
+            .values(message_id=reply.id, content=placeholder, sources="[]", error=1, selected=1)
+            .returning(reply_versions.c.id)
+        ).scalar_one()
+        db.execute(update(messages).where(messages.c.id == reply.id).values(content=placeholder, sources="[]", error=1))
+    return {"question": question.content, "reply_id": reply.id, "version_id": version_id, "versions": count + 1}
+
+
+def select_version(user_id, message_id, index):
+    """Shows another version of the last reply in a chat. Returns the version, or None if that isn't possible."""
+    with engine().begin() as db:
+        conversation_id = db.execute(
+            select(messages.c.conversation_id)
+            .join(conversations, conversations.c.id == messages.c.conversation_id)
+            .where(messages.c.id == message_id, conversations.c.user_id == user_id)
+        ).scalar()
+        if conversation_id is None:
+            return None
+        newest = db.execute(select(func.max(messages.c.id)).where(messages.c.conversation_id == conversation_id)).scalar()
+        versions = db.execute(
+            select(reply_versions).where(reply_versions.c.message_id == message_id).order_by(reply_versions.c.id)
+        ).all()
+        if newest != message_id or not 0 <= index < len(versions):
+            return None
+        chosen = versions[index]
+        db.execute(update(reply_versions).where(reply_versions.c.message_id == message_id).values(selected=0))
+        db.execute(update(reply_versions).where(reply_versions.c.id == chosen.id).values(selected=1))
+        db.execute(
+            update(messages)
+            .where(messages.c.id == message_id)
+            .values(content=chosen.content, sources=chosen.sources, error=chosen.error)
+        )
+    return {
+        "content": chosen.content,
+        "sources": json.loads(chosen.sources),
+        "error": bool(chosen.error),
+        "versions": len(versions),
+        "version": index,
+    }
 
 
 def add_message(user_id, conversation_id, role, content, sources=(), error=False):
@@ -573,15 +677,17 @@ def add_message(user_id, conversation_id, role, content, sources=(), error=False
         ).rowcount
         if not owned:
             raise PermissionError("That chat belongs to another user.")
-        db.execute(
-            insert(messages).values(
+        return db.execute(
+            insert(messages)
+            .values(
                 conversation_id=conversation_id,
                 role=role,
                 content=content,
                 sources=json.dumps(list(sources)),
                 error=int(error),
             )
-        )
+            .returning(messages.c.id)
+        ).scalar_one()
 
 
 def export_user_data(user_id):
