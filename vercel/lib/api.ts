@@ -16,18 +16,23 @@ export type Me = {
   more_models: boolean;
 };
 
+/** Older chats stored sources as plain text, newer ones as objects with an optional link. */
+export type Source = string | { label: string; url?: string };
+
 export type Message = {
   role: "user" | "assistant";
   content: string;
-  sources: string[];
+  sources: Source[];
   error: boolean;
 };
+
+export type ChatSummary = { id: string; title: string; updated: number };
 
 export type ChatEvent =
   | { type: "conversation"; id: string }
   | { type: "text"; text: string }
   | { type: "status"; text: string }
-  | { type: "done"; sources: string[] }
+  | { type: "done"; sources: Source[] }
   | { type: "error"; text: string };
 
 export class ApiError extends Error {
@@ -73,6 +78,7 @@ export async function uploadDocuments(files: File[]): Promise<{ documents: strin
 export async function sendChat(
   body: { message: string; mode: Mode; conversation_id: string | null; model: string | null },
   onEvent: (event: ChatEvent) => void,
+  signal?: AbortSignal,
 ) {
   let response: Response;
   try {
@@ -80,8 +86,10 @@ export async function sendChat(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal,
     });
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) return;
     throw new ApiError(0, "Couldn't reach Paradigm. Check your connection and try again.");
   }
   if (!response.ok || !response.body) throw await failure(response);
@@ -89,12 +97,17 @@ export async function sendChat(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) if (line.trim()) onEvent(JSON.parse(line));
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) if (line.trim()) onEvent(JSON.parse(line));
+    }
+  } catch (error) {
+    // Stopping a reply cancels the stream on purpose
+    if (!signal?.aborted) throw error;
   }
 }

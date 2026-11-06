@@ -49,14 +49,15 @@ def client():
 
 
 def search_web(query):
-    """Returns (text for the model, sources to show the user)."""
+    """Returns (text for the model, sources to show the user as {"label", "url"})."""
     results = DDGS(timeout=10).text(query[:200], max_results=WEB_RESULTS)
     lines, sources = [], []
     for result in results:
         title = re.sub(r"[\[\]()`*_]", "", result.get("title", ""))[:60]
         site = urlparse(result.get("href", "")).netloc
         lines.append(f"{title} ({site}): {result.get('body', '')}")
-        sources.append(f"{title} ({site})")
+        url = result.get("href", "")
+        sources.append({"label": f"{title} ({site})", "url": url if url.startswith(("https://", "http://")) else ""})
     return "\n".join(lines)[:MAX_RESULT_CHARS] or "No results found.", sources
 
 

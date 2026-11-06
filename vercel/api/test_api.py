@@ -153,7 +153,7 @@ stream = events(response)
 assert [e["type"] for e in stream] == ["conversation", "text", "text", "done"], stream
 chat_id = stream[0]["id"]
 listed = alice.get("/api/conversations", params={"mode": "general"}).json()
-assert listed == [{"id": chat_id, "title": "What is torque?"}]
+assert [(c["id"], c["title"]) for c in listed] == [(chat_id, "What is torque?")] and listed[0]["updated"] > 0
 assert [m["content"] for m in alice.get(f"/api/conversations/{chat_id}").json()] == ["What is torque?", "Hello there"]
 
 # Earlier messages go to the model in order, with the current message once
@@ -273,7 +273,7 @@ assert joan.get("/api/me").json()["documents"] == ["policy.pdf"], "failed upload
 _, groq = send(joan, "What is your refund policy?", mode="assistant")
 assert "thirty days" in groq.calls[0]["messages"][0]["content"]
 response, _ = send(joan, "What is your refund policy?", mode="assistant")
-assert events(response)[-1]["sources"] == ["policy.pdf (page 1)"]
+assert events(response)[-1]["sources"] == [{"label": "policy.pdf (page 1)"}]
 _, groq = send(joan, "What is your refund policy?", mode="general")
 assert "thirty days" not in json.dumps(groq.calls[0]["messages"])
 assert store.search_documents(1, "refund") == ("", []), "one user's documents never reach another"
@@ -282,7 +282,10 @@ with patch.dict(store.LIMITS, {"upload": [(True, 0, store.DAY, "Upload limit")]}
     assert upload(joan, ("policy.pdf", pdf_with("x"))).status_code == 429
 
 # --- Tool calling ---
-web_hits = [{"title": "Result [title]", "href": "https://example.com/page", "body": "A useful fact"}]
+web_hits = [
+    {"title": "Result [title]", "href": "https://example.com/page", "body": "A useful fact"},
+    {"title": "Bad link", "href": "javascript:alert(1)", "body": "Unsafe"},
+]
 
 
 def turn(groq, limit=2, search=None):
@@ -303,7 +306,8 @@ with patch.object(_chat, "DDGS") as ddgs:
     # A tool result goes back to the model, and the source is kept for the user
     text, chat, sources, results = turn(FakeGroq([tool_chunk("web_search", "python")], [word_chunk("The answer")]))
     assert text == "The answer" and "A useful fact" in tool_results(chat)[0]
-    assert sources == ["Result title (example.com)"], sources
+    assert sources[0] == {"label": "Result title (example.com)", "url": "https://example.com/page"}, sources
+    assert sources[1]["url"] == "", "only web links become clickable, never javascript: or other schemes"
     assert ("status", "Searching the web") in results
 
     # The plan's limit stops further tool calls, and the model still answers
@@ -339,9 +343,9 @@ _, chat, _, _ = turn(FakeGroq([tool_chunk("search_documents", "x")], [word_chunk
 assert "no tool called" in tool_results(chat)[0], "document search needs documents"
 text, _, sources, _ = turn(
     FakeGroq([tool_chunk("search_documents", "refund")], [word_chunk("Fine")]),
-    search=lambda query: ("Refund text", ["policy.pdf (page 1)"]),
+    search=lambda query: ("Refund text", [{"label": "policy.pdf (page 1)"}]),
 )
-assert text == "Fine" and sources == ["policy.pdf (page 1)"]
+assert text == "Fine" and sources == [{"label": "policy.pdf (page 1)"}]
 
 # A bad tool request falls back to answering without tools, and real failures still surface
 groq = FakeGroq(RuntimeError("tool_use_failed"), [word_chunk("No tools needed")])

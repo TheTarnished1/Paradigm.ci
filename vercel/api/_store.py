@@ -360,7 +360,7 @@ def replace_documents(user_id, names, chunks):
 
 
 def search_documents(user_id, query, limit=3):
-    """Returns (text, sources) for the chunks that best match the query's words."""
+    """Returns (text, sources) for the chunks that best match the query's words. Sources are {"label"}."""
     # Any word can match, because people ask in sentences that don't appear word for word in documents
     words = re.findall(r"\w+", query)[:30]
     if not words:
@@ -376,7 +376,7 @@ def search_documents(user_id, query, limit=3):
         ).all()
     sources = []
     for source, page, _ in rows:
-        label = f"{source} (page {page})"
+        label = {"label": f"{source} (page {page})"}
         if label not in sources:
             sources.append(label)
     return "\n\n".join(row[2] for row in rows), sources
@@ -394,7 +394,7 @@ def create_conversation(user_id, mode, title):
 def list_conversations(user_id, mode, limit=30):
     with engine().connect() as db:
         rows = db.execute(
-            select(conversations.c.id, conversations.c.title)
+            select(conversations.c.id, conversations.c.title, conversations.c.updated)
             .where(conversations.c.user_id == user_id, conversations.c.mode == mode)
             .order_by(conversations.c.updated.desc())
             .limit(limit)
