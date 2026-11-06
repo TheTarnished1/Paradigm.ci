@@ -1,12 +1,13 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { api, ApiError, Me, Setup, uploadDocuments } from "@/lib/api";
+import { api, ApiError, Me, Memory, Setup, uploadDocuments } from "@/lib/api";
 import { CREDIT, PrivacyNotice } from "./Privacy";
 
-type Tab = "setup" | "status" | "account" | "privacy";
+type Tab = "setup" | "memory" | "status" | "account" | "privacy";
 const TABS: [Tab, string][] = [
   ["setup", "Setup"],
+  ["memory", "Memory"],
   ["status", "Status"],
   ["account", "Account"],
   ["privacy", "Privacy"],
@@ -96,6 +97,63 @@ function SetupTab({ me, onChanged }: Pick<Props, "me" | "onChanged">) {
         {busy ? "Saving..." : "Save"}
       </button>
     </form>
+  );
+}
+
+function MemoryTab() {
+  const [memories, setMemories] = useState<Memory[] | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api<Memory[]>("memories").then(setMemories).catch((failure) => setError(message(failure)));
+  }, []);
+
+  async function forget(path: string, keep: (memory: Memory) => boolean) {
+    setError("");
+    try {
+      await api(path, "DELETE");
+      setMemories((list) => (list ?? []).filter(keep));
+    } catch (failure) {
+      setError(message(failure));
+    }
+  }
+
+  return (
+    <div className="form">
+      <p className="small muted">
+        Paradigm remembers useful things you tell it, like your name, work or goals, to give better answers. Ask it to
+        remember something, or delete anything here. Temporary chats never add memories.
+      </p>
+      {memories === null && !error && <p role="status">Loading...</p>}
+      {memories?.length === 0 && <p className="muted">Nothing saved yet.</p>}
+      {memories && memories.length > 0 && (
+        <ul className="memory-list">
+          {memories.map((memory) => (
+            <li key={memory.id}>
+              <span>{memory.content}</span>
+              <button
+                className="icon-button small"
+                aria-label={`Forget: ${memory.content}`}
+                title="Forget"
+                onClick={() => forget(`memories/${memory.id}`, (item) => item.id !== memory.id)}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {memories && memories.length > 0 && (
+        <button className="button danger wide" onClick={() => forget("memories", () => false)}>
+          Forget everything
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -262,6 +320,7 @@ export default function Settings({ me, model, onChanged, onSignedOut, onClose }:
           ))}
         </div>
         {tab === "setup" && <SetupTab me={me} onChanged={onChanged} />}
+        {tab === "memory" && <MemoryTab />}
         {tab === "status" && <StatusTab me={me} model={model} />}
         {tab === "account" && <AccountTab me={me} onSignedOut={onSignedOut} />}
         {tab === "privacy" && (

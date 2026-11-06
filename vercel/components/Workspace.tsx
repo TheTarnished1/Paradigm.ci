@@ -3,19 +3,27 @@
 import {
   ArrowUp,
   Check,
-  Copy,
   FileText,
   Globe,
   Lightbulb,
+  MessageCircleDashed,
   MessageSquare,
+  Mic,
+  MoreHorizontal,
   NotebookPen,
   PanelLeft,
   Paperclip,
+  Pencil,
   PenLine,
+  Pin,
+  PinOff,
   Plus,
+  RotateCcw,
   Search,
+  Share2,
   Sparkles,
   Square,
+  Telescope,
   Trash2,
   X,
 } from "lucide-react";
@@ -30,11 +38,11 @@ import {
   useRef,
   useState,
 } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { api, ApiError, ChatSummary, Me, Message, Mode, sendChat, Source, uploadDocuments } from "@/lib/api";
+import { api, ApiError, ChatRequest, ChatSummary, Me, Message, Mode, sendChat, uploadDocuments } from "@/lib/api";
 import { CREDIT } from "./Privacy";
+import Reply, { CopyButton, SpeakButton } from "./Reply";
 import Settings from "./Settings";
+import ShareDialog from "./ShareDialog";
 
 type Suggestion = { icon: ReactNode; title: string; prompt: string };
 
@@ -51,9 +59,8 @@ const SUGGESTIONS: Record<Mode, Suggestion[]> = {
   ],
 };
 
-// Some models add markers like 【web_search】 where they used a tool. The server removes them when it saves.
-const TOOL_MARKERS = /\s?【[^】]{0,40}】/g;
 const DAY = 24 * 60 * 60 * 1000;
+const HISTORY_MESSAGES = 10;
 
 function greeting(name: string) {
   const hour = new Date().getHours();
@@ -64,6 +71,7 @@ function greeting(name: string) {
 function groupChats(chats: ChatSummary[]) {
   const startOfToday = new Date().setHours(0, 0, 0, 0);
   const groups: [string, ChatSummary[]][] = [
+    ["Pinned", []],
     ["Today", []],
     ["Yesterday", []],
     ["Previous 7 days", []],
@@ -71,106 +79,26 @@ function groupChats(chats: ChatSummary[]) {
   ];
   for (const chat of chats) {
     const when = chat.updated * 1000;
-    const index = when >= startOfToday ? 0 : when >= startOfToday - DAY ? 1 : when >= startOfToday - 7 * DAY ? 2 : 3;
-    groups[index][1].push(chat);
+    const age = when >= startOfToday ? 1 : when >= startOfToday - DAY ? 2 : when >= startOfToday - 7 * DAY ? 3 : 4;
+    groups[chat.pinned ? 0 : age][1].push(chat);
   }
   return groups.filter(([, items]) => items.length > 0);
 }
 
-function sourceParts(source: Source) {
-  return typeof source === "string" ? { label: source, url: "" } : { label: source.label, url: source.url ?? "" };
-}
+// The Web Speech API isn't in TypeScript's DOM types yet, so this describes the part used here
+type Recognition = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+  onend: (() => void) | null;
+};
 
-function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) {
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {}
-  }
-  return (
-    <button className="icon-button small" onClick={copy} aria-label={copied ? "Copied" : label} title={copied ? "Copied" : label}>
-      {copied ? <Check size={16} /> : <Copy size={16} />}
-    </button>
-  );
-}
-
-function CodeBlock({ children }: { children?: ReactNode }) {
-  const ref = useRef<HTMLPreElement>(null);
-  const [text, setText] = useState("");
-  useEffect(() => setText(ref.current?.innerText ?? ""), [children]);
-  return (
-    <div className="code-block">
-      <div className="code-bar">
-        <span>Code</span>
-        <CopyButton text={text} label="Copy code" />
-      </div>
-      <pre ref={ref}>{children}</pre>
-    </div>
-  );
-}
-
-function Sources({ sources }: { sources: Source[] }) {
-  return (
-    <div className="sources" aria-label="Sources">
-      {sources.map(sourceParts).map(({ label, url }, index) => {
-        const isWeb = Boolean(url);
-        const content = (
-          <>
-            <span className="source-icon" aria-hidden="true">
-              {isWeb ? <Globe size={14} /> : <FileText size={14} />}
-            </span>
-            <span className="source-label">{label}</span>
-          </>
-        );
-        return isWeb ? (
-          <a key={index} className="source" href={url} target="_blank" rel="noopener noreferrer">
-            {content}
-          </a>
-        ) : (
-          <span key={index} className="source">
-            {content}
-          </span>
-        );
-      })}
-    </div>
-  );
-}
-
-function Reply({ message }: { message: Message }) {
-  const text = message.content.replace(TOOL_MARKERS, "");
-  return (
-    <article className={message.error ? "reply failed" : "reply"}>
-      <div className="reply-mark" aria-hidden="true">
-        <img src="/logo.svg" alt="" width={16} height={16} />
-      </div>
-      <div className="reply-body">
-        <div className="prose">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={{
-              a: ({ children, href }) => (
-                <a href={href} target="_blank" rel="noopener noreferrer">
-                  {children}
-                </a>
-              ),
-              pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
-            }}
-          >
-            {text}
-          </ReactMarkdown>
-        </div>
-        {message.sources.length > 0 && <Sources sources={message.sources} />}
-        {!message.error && text && (
-          <div className="reply-actions">
-            <CopyButton text={text} label="Copy reply" />
-          </div>
-        )}
-      </div>
-    </article>
-  );
+function speechRecognition(): (new () => Recognition) | null {
+  const scope = window as unknown as Record<string, (new () => Recognition) | undefined>;
+  return scope.SpeechRecognition ?? scope.webkitSpeechRecognition ?? null;
 }
 
 type Props = { me: Me; onChanged: (me: Me) => void; onSignedOut: () => void };
@@ -190,10 +118,19 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [temporary, setTemporary] = useState(false);
+  const [research, setResearch] = useState(false);
+  const [rowMenu, setRowMenu] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
+  const [sharing, setSharing] = useState<ChatSummary | null>(null);
+  const [editing, setEditing] = useState<{ index: number; text: string } | null>(null);
+  const [canListen, setCanListen] = useState(false);
+  const [listening, setListening] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const recognitionRef = useRef<Recognition | null>(null);
   const name = me.setup.ci_name || "Paradigm";
   const speaker = mode === "assistant" ? name : "Paradigm";
 
@@ -216,44 +153,55 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
-  }, [messages, status]);
+  }, [messages, status, sending]);
+
+  useEffect(() => setCanListen(Boolean(speechRecognition())), []);
+  useEffect(() => () => recognitionRef.current?.stop(), []);
 
   useEffect(() => {
-    if (!menuOpen) return;
-    const close = (event: globalThis.KeyboardEvent) => event.key === "Escape" && setMenuOpen(false);
+    if (!menuOpen && !rowMenu) return;
+    const close = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setMenuOpen(false);
+      setRowMenu(null);
+    };
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
-  }, [menuOpen]);
+  }, [menuOpen, rowMenu]);
 
   const groups = useMemo(() => {
     const term = filter.trim().toLowerCase();
     return groupChats(term ? chats.filter((chat) => chat.title.toLowerCase().includes(term)) : chats);
   }, [chats, filter]);
 
-  function chooseMode(next: Mode) {
-    if (sending) return;
-    setMode(next);
+  function reset() {
     setChatId(null);
     setMessages([]);
     setNotice("");
-    setFilter("");
+    setEditing(null);
     setMenuOpen(false);
+    setRowMenu(null);
   }
 
-  function newChat() {
+  function chooseMode(next: Mode) {
     if (sending) return;
-    setChatId(null);
-    setMessages([]);
-    setNotice("");
-    setMenuOpen(false);
+    reset();
+    setMode(next);
+    setFilter("");
+  }
+
+  function newChat(asTemporary = false) {
+    if (sending) return;
+    reset();
+    setTemporary(asTemporary);
     if (!mode) setMode("general");
     setTimeout(() => inputRef.current?.focus());
   }
 
   async function openChat(id: string) {
     if (sending) return;
-    setMenuOpen(false);
-    setNotice("");
+    reset();
+    setTemporary(false);
     setChatId(id);
     try {
       setMessages(await api<Message[]>(`conversations/${id}`));
@@ -263,6 +211,7 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
   }
 
   async function removeChat(id: string) {
+    setRowMenu(null);
     try {
       await api(`conversations/${id}`, "DELETE");
       setChats((list) => list.filter((chat) => chat.id !== id));
@@ -270,6 +219,26 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
     } catch (error) {
       fail(error);
     }
+  }
+
+  async function updateChat(id: string, change: { title?: string; pinned?: boolean }) {
+    setRowMenu(null);
+    setRenaming(null);
+    try {
+      await api(`conversations/${id}`, "PATCH", change);
+      if (mode) await loadChats(mode);
+    } catch (error) {
+      fail(error);
+    }
+  }
+
+  function submitRename(event: FormEvent) {
+    event.preventDefault();
+    if (!renaming) return;
+    const title = renaming.title.trim();
+    const old = chats.find((chat) => chat.id === renaming.id)?.title;
+    if (title && title !== old) updateChat(renaming.id, { title });
+    else setRenaming(null);
   }
 
   async function attach(event: ChangeEvent<HTMLInputElement>) {
@@ -289,18 +258,55 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
     }
   }
 
+  function listen() {
+    if (listening) return recognitionRef.current?.stop();
+    const Speech = speechRecognition();
+    if (!Speech) return;
+    const recognition = new Speech();
+    const start = draft.trim();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = navigator.language;
+    recognition.onresult = (event) => {
+      const heard = Array.from(event.results, (result) => result[0].transcript).join("");
+      setDraft(start ? `${start} ${heard}` : heard);
+    };
+    recognition.onend = () => {
+      setListening(false);
+      recognitionRef.current = null;
+    };
+    recognitionRef.current = recognition;
+    try {
+      recognition.start();
+      setListening(true);
+    } catch {
+      recognitionRef.current = null;
+    }
+  }
+
   function stop() {
     abortRef.current?.abort();
   }
 
-  async function send(text: string) {
+  /** How many saved messages come before this one. Replies stopped part way are only shown here, never saved. */
+  function savedBefore(index: number) {
+    return messages.slice(0, index).filter((message) => !message.local).length;
+  }
+
+  /** Sends a message. With `from`, everything from that message on is replaced, for editing and regenerating. */
+  async function send(text: string, from?: number) {
     const message = text.trim();
     if (!message || sending || !mode) return;
-    setDraft("");
+    recognitionRef.current?.stop();
+    const original = messages;
+    const before = from === undefined ? messages : messages.slice(0, from);
+    const deepResearch = research;
+    if (from === undefined) setDraft("");
+    setEditing(null);
     setNotice("");
+    setResearch(false);
     setSending(true);
-    setStatus("Thinking");
-    const before = messages;
+    setStatus(deepResearch ? "Researching" : "Thinking");
     setMessages([
       ...before,
       { role: "user", content: message, sources: [], error: false },
@@ -311,28 +317,43 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
     const controller = new AbortController();
     abortRef.current = controller;
 
+    const body: ChatRequest = { message, mode, conversation_id: temporary ? null : chatId, model: model || null };
+    if (deepResearch) body.research = true;
+    if (temporary) {
+      body.temporary = true;
+      body.history = before
+        .filter((past) => !past.error && !past.local)
+        .slice(-HISTORY_MESSAGES)
+        .map((past) => ({ role: past.role, content: past.content.slice(0, 8000) }));
+    } else if (from !== undefined && chatId) {
+      body.keep = savedBefore(from);
+    }
+
     try {
       await sendChat(
-        { message, mode, conversation_id: chatId, model: model || null },
+        body,
         (event) => {
           if (event.type === "conversation") setChatId(event.id);
           else if (event.type === "status") setStatus(event.text);
           else if (event.type === "text") {
             setStatus(null);
             updateReply((reply) => ({ ...reply, content: reply.content + event.text }));
-          } else if (event.type === "done") updateReply((reply) => ({ ...reply, sources: event.sources }));
-          else if (event.type === "error") updateReply((reply) => ({ ...reply, content: event.text, error: true }));
+          } else if (event.type === "done") {
+            updateReply((reply) => ({ ...reply, sources: event.sources, followups: event.followups }));
+          } else if (event.type === "error") {
+            updateReply((reply) => ({ ...reply, content: event.text, error: true }));
+          }
         },
         controller.signal,
       );
       if (controller.signal.aborted) {
-        updateReply((reply) => (reply.content ? reply : { ...reply, content: "Stopped.", error: true }));
+        updateReply((reply) => ({ ...reply, content: reply.content || "Stopped.", error: !reply.content, local: true }));
       }
-      loadChats(mode);
+      if (!temporary) loadChats(mode);
     } catch (error) {
-      // Nothing was saved, so put the message back to send again
-      setMessages(before);
-      setDraft(message);
+      // Nothing was saved, so put things back to try again
+      setMessages(original);
+      if (from === undefined) setDraft(message);
       fail(error);
     } finally {
       abortRef.current = null;
@@ -340,6 +361,11 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
       setStatus(null);
       inputRef.current?.focus();
     }
+  }
+
+  function regenerate(replyIndex: number) {
+    const question = messages[replyIndex - 1];
+    if (question?.role === "user") send(question.content, replyIndex - 1);
   }
 
   function submit(event: FormEvent) {
@@ -354,19 +380,30 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
     }
   }
 
+  function handleEditKey(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Escape") setEditing(null);
+    else if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && editing) {
+      event.preventDefault();
+      send(editing.text, editing.index);
+    }
+  }
+
   const suggestions = mode ? [...SUGGESTIONS[mode]] : [];
   if (mode === "assistant" && me.documents.length) {
     suggestions[1] = { icon: <FileText size={18} />, title: "Sum up my documents", prompt: "Summarize my documents." };
   }
   const lastIndex = messages.length - 1;
-  const workspaceClass = ["workspace", sidebarHidden ? "sidebar-hidden" : ""].join(" ");
+  const last = messages[lastIndex];
+  const followups = !sending && last?.role === "assistant" ? (last.followups ?? []) : [];
+  const currentChat = chats.find((chat) => chat.id === chatId);
+  const workspaceClass = ["workspace", sidebarHidden ? "sidebar-hidden" : "", temporary ? "temporary" : ""].join(" ");
 
   return (
     <div className={workspaceClass}>
       {menuOpen && <button className="scrim" aria-label="Close menu" onClick={() => setMenuOpen(false)} />}
       <aside className={menuOpen ? "sidebar glass open" : "sidebar glass"} aria-label="Chats">
         <div className="sidebar-top">
-          <button className="brand" onClick={() => { if (!sending) { setMode(null); setMenuOpen(false); } }}>
+          <button className="brand" onClick={() => { if (!sending) { setMode(null); setTemporary(false); setMenuOpen(false); } }}>
             Paradigm<span className="dot">.</span>
           </button>
           <button className="icon-button hide-sidebar" aria-label="Hide sidebar" title="Hide sidebar" onClick={() => setSidebarHidden(true)}>
@@ -377,7 +414,7 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
           </button>
         </div>
 
-        <button className="button primary wide new-chat" onClick={newChat} disabled={sending}>
+        <button className="button primary wide new-chat" onClick={() => newChat()} disabled={sending}>
           <Plus size={18} aria-hidden="true" /> New chat
         </button>
 
@@ -403,14 +440,56 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
               <h2 className="eyebrow">{label}</h2>
               <ul>
                 {items.map((chat) => (
-                  <li key={chat.id} className={chat.id === chatId ? "chat-row active" : "chat-row"}>
-                    <button className="chat-title" onClick={() => openChat(chat.id)} title={chat.title} aria-current={chat.id === chatId ? "page" : undefined}>
-                      <MessageSquare size={14} aria-hidden="true" />
-                      <span>{chat.title}</span>
-                    </button>
-                    <button className="chat-delete" onClick={() => removeChat(chat.id)} aria-label={`Delete chat: ${chat.title}`} title="Delete chat">
-                      <Trash2 size={15} />
-                    </button>
+                  <li key={chat.id}>
+                    {renaming?.id === chat.id ? (
+                      <form className="chat-row renaming" onSubmit={submitRename}>
+                        <input
+                          autoFocus
+                          value={renaming.title}
+                          maxLength={80}
+                          aria-label="Chat name"
+                          onChange={(event) => setRenaming({ id: chat.id, title: event.target.value })}
+                          onKeyDown={(event) => event.key === "Escape" && setRenaming(null)}
+                          onBlur={submitRename}
+                        />
+                        <button className="chat-more" aria-label="Save name" onMouseDown={(event) => event.preventDefault()}>
+                          <Check size={15} />
+                        </button>
+                      </form>
+                    ) : (
+                      <div className={chat.id === chatId ? "chat-row active" : "chat-row"}>
+                        <button className="chat-title" onClick={() => openChat(chat.id)} title={chat.title} aria-current={chat.id === chatId ? "page" : undefined}>
+                          {chat.pinned ? <Pin size={14} aria-hidden="true" /> : <MessageSquare size={14} aria-hidden="true" />}
+                          <span>{chat.title}</span>
+                        </button>
+                        <button
+                          className="chat-more"
+                          onClick={() => setRowMenu(rowMenu === chat.id ? null : chat.id)}
+                          aria-label={`Options for ${chat.title}`}
+                          aria-expanded={rowMenu === chat.id}
+                          title="Options"
+                        >
+                          <MoreHorizontal size={16} />
+                        </button>
+                      </div>
+                    )}
+                    {rowMenu === chat.id && (
+                      <div className="chat-menu" role="group" aria-label={`Options for ${chat.title}`}>
+                        <button onClick={() => updateChat(chat.id, { pinned: !chat.pinned })}>
+                          {chat.pinned ? <PinOff size={15} aria-hidden="true" /> : <Pin size={15} aria-hidden="true" />}
+                          {chat.pinned ? "Unpin" : "Pin"}
+                        </button>
+                        <button onClick={() => { setRowMenu(null); setRenaming({ id: chat.id, title: chat.title }); }}>
+                          <Pencil size={15} aria-hidden="true" /> Rename
+                        </button>
+                        <button onClick={() => { setRowMenu(null); setSharing(chat); }}>
+                          <Share2 size={15} aria-hidden="true" /> Share
+                        </button>
+                        <button className="danger-text" onClick={() => removeChat(chat.id)}>
+                          <Trash2 size={15} aria-hidden="true" /> Delete
+                        </button>
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -452,16 +531,33 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
             ))}
           </div>
           {mode && (
-            <label className="model-picker">
-              <span className="sr-only">Model</span>
-              <select value={model} onChange={(event) => setModel(event.target.value)} disabled={sending}>
-                {me.models.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div className="topbar-actions">
+              <label className="model-picker">
+                <span className="sr-only">Model</span>
+                <select value={model} onChange={(event) => setModel(event.target.value)} disabled={sending}>
+                  {me.models.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {currentChat && !temporary && (
+                <button className="icon-button" onClick={() => setSharing(currentChat)} aria-label="Share chat" title="Share chat">
+                  <Share2 size={18} />
+                </button>
+              )}
+              <button
+                className={temporary ? "icon-button toggle on" : "icon-button toggle"}
+                onClick={() => newChat(!temporary)}
+                disabled={sending}
+                aria-pressed={temporary}
+                aria-label="Temporary chat"
+                title={temporary ? "Leave temporary chat" : "Temporary chat: not saved, no memory"}
+              >
+                <MessageCircleDashed size={18} />
+              </button>
+            </div>
           )}
         </header>
 
@@ -498,13 +594,15 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
                 {messages.length === 0 && (
                   <section className="welcome">
                     <h1 className="headline">
-                      {mode === "assistant" ? `Hi, I'm ${name}` : greeting(me.username)}
+                      {temporary ? "Temporary chat" : mode === "assistant" ? `Hi, I'm ${name}` : greeting(me.username)}
                       <span className="dot">.</span>
                     </h1>
                     <p className="lede">
-                      {mode === "assistant" && me.setup.business_name
-                        ? `Here to help ${me.setup.business_name}. What do you need?`
-                        : "What can I help you with?"}
+                      {temporary
+                        ? "This chat won't be saved to your history, and nothing from it goes into memory."
+                        : mode === "assistant" && me.setup.business_name
+                          ? `Here to help ${me.setup.business_name}. What do you need?`
+                          : "What can I help you with?"}
                     </p>
                     <div className="suggestions">
                       {suggestions.map((item) => (
@@ -517,20 +615,87 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
                     </div>
                   </section>
                 )}
-                {messages.map((message, index) =>
-                  message.role === "user" ? (
-                    <div key={index} className="bubble">
-                      {message.content}
-                    </div>
-                  ) : index === lastIndex && !message.content && status ? (
-                    <div key={index} className="thinking" role="status">
-                      <span className="pulse" aria-hidden="true" />
-                      {status}
-                      <span className="dots" aria-hidden="true" />
-                    </div>
-                  ) : (
-                    <Reply key={index} message={message} />
-                  ),
+                {messages.map((message, index) => {
+                  if (message.role === "user") {
+                    return editing?.index === index ? (
+                      <form
+                        key={index}
+                        className="edit-box glass"
+                        onSubmit={(event) => { event.preventDefault(); send(editing.text, index); }}
+                      >
+                        <textarea
+                          autoFocus
+                          value={editing.text}
+                          maxLength={4000}
+                          rows={3}
+                          aria-label="Edit message"
+                          onChange={(event) => setEditing({ index, text: event.target.value })}
+                          onKeyDown={handleEditKey}
+                        />
+                        <div className="edit-actions">
+                          <button type="button" className="button" onClick={() => setEditing(null)}>
+                            Cancel
+                          </button>
+                          <button className="button primary" disabled={!editing.text.trim()}>
+                            Send
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <div key={index} className="user-turn">
+                        <div className="bubble">{message.content}</div>
+                        {!sending && (
+                          <div className="bubble-actions">
+                            <CopyButton text={message.content} label="Copy message" />
+                            <button
+                              className="icon-button small"
+                              onClick={() => setEditing({ index, text: message.content })}
+                              aria-label="Edit message"
+                              title="Edit"
+                            >
+                              <Pencil size={15} />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+                  if (index === lastIndex && !message.content && status) {
+                    return (
+                      <div key={index} className="thinking" role="status">
+                        <span className="pulse" aria-hidden="true" />
+                        {status}
+                        <span className="dots" aria-hidden="true" />
+                      </div>
+                    );
+                  }
+                  const finished = !(sending && index === lastIndex);
+                  const actions = (text: string) => (
+                    <>
+                      {!message.error && text && <CopyButton text={text} label="Copy reply" />}
+                      {!message.error && text && <SpeakButton text={text} />}
+                      {index === lastIndex && (
+                        <button
+                          className="icon-button small"
+                          onClick={() => regenerate(index)}
+                          aria-label={message.error ? "Try again" : "Regenerate reply"}
+                          title={message.error ? "Try again" : "Regenerate"}
+                        >
+                          <RotateCcw size={15} />
+                        </button>
+                      )}
+                    </>
+                  );
+                  return <Reply key={index} message={message} actions={finished ? actions : undefined} />;
+                })}
+                {followups.length > 0 && (
+                  <div className="followups" aria-label="Suggested follow-ups">
+                    {followups.map((question) => (
+                      <button key={question} className="followup glass" onClick={() => send(question)}>
+                        {question}
+                      </button>
+                    ))}
+                  </div>
                 )}
                 {notice && (
                   <p className="notice" role="status">
@@ -544,14 +709,7 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
               <div className="glass composer-box">
                 {mode === "assistant" && (
                   <>
-                    <input
-                      ref={fileRef}
-                      type="file"
-                      accept="application/pdf"
-                      multiple
-                      hidden
-                      onChange={attach}
-                    />
+                    <input ref={fileRef} type="file" accept="application/pdf" multiple hidden onChange={attach} />
                     <button
                       type="button"
                       className="icon-button attach"
@@ -564,16 +722,48 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
                     </button>
                   </>
                 )}
+                <button
+                  type="button"
+                  className={research ? "research-toggle on" : "research-toggle"}
+                  onClick={() => setResearch(!research)}
+                  disabled={sending}
+                  aria-pressed={research}
+                  aria-label="Deep research"
+                  title="Deep research: more searches and a longer report with sources"
+                >
+                  <Telescope size={16} aria-hidden="true" />
+                  <span className="research-label">Research</span>
+                </button>
                 <textarea
                   ref={inputRef}
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={handleKey}
-                  placeholder={uploading ? "Reading your documents..." : `Message ${speaker}`}
+                  placeholder={
+                    uploading
+                      ? "Reading your documents..."
+                      : listening
+                        ? "Listening..."
+                        : research
+                          ? "What should I research?"
+                          : `Message ${speaker}`
+                  }
                   aria-label={`Message ${speaker}`}
                   rows={1}
                   maxLength={4000}
                 />
+                {canListen && !sending && (
+                  <button
+                    type="button"
+                    className={listening ? "icon-button mic on" : "icon-button mic"}
+                    onClick={listen}
+                    aria-pressed={listening}
+                    aria-label={listening ? "Stop voice typing" : "Voice typing"}
+                    title={listening ? "Stop voice typing" : "Voice typing"}
+                  >
+                    <Mic size={18} />
+                  </button>
+                )}
                 {sending ? (
                   <button type="button" className="send stop" onClick={stop} aria-label="Stop replying" title="Stop">
                     <Square size={14} fill="currentColor" />
@@ -585,7 +775,8 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
                 )}
               </div>
               <p className="composer-hint small muted">
-                Enter to send, Shift + Enter for a new line. Paradigm can make mistakes, so check important facts.
+                {temporary ? "Temporary chat: not saved and not used for memory. " : ""}
+                Paradigm can make mistakes, so check important facts.
               </p>
             </form>
           </>
@@ -601,6 +792,7 @@ export default function Workspace({ me, onChanged, onSignedOut }: Props) {
           onClose={() => setSettingsOpen(false)}
         />
       )}
+      {sharing && <ShareDialog chatId={sharing.id} title={sharing.title} onClose={() => setSharing(null)} />}
     </div>
   );
 }
