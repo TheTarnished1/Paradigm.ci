@@ -38,6 +38,8 @@ SESSION_SECONDS = 30 * 24 * 60 * 60
 MIN_PASSWORD_LENGTH = 8
 USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_.-]{3,30}")
 MAX_CHUNKS_PER_USER = 2000
+MAX_MEMORIES = 50
+MAX_MEMORY_CHARS = 300
 MINUTE = 60
 DAY = 24 * 60 * 60
 
@@ -57,6 +59,7 @@ PLANS = {
         "messages_per_minute": 6,
         "messages_per_day": 30,
         "tool_calls": 2,
+        "research_tool_calls": 4,
     },
     "paid": {
         "label": "Paid",
@@ -64,6 +67,7 @@ PLANS = {
         "messages_per_minute": 15,
         "messages_per_day": 100,
         "tool_calls": 10,
+        "research_tool_calls": 15,
     },
 }
 
@@ -75,6 +79,8 @@ LIMITS = {
         (False, 20, MINUTE, "Paradigm is busy right now. Try again in a minute."),
         (False, 150, DAY, "Paradigm has reached today's limit for everyone. Try again tomorrow."),
     ],
+    "research": [(True, 5, DAY, "You've used today's 5 deep research runs. Try again tomorrow.")],
+    "share": [(True, 20, DAY, "You've shared 20 chats today. Try again tomorrow.")],
     "upload": [(True, 5, DAY, "You've reached today's limit of 5 document uploads. Try again tomorrow.")],
     "recovery": [(False, 30, 60 * MINUTE, "Too many password resets right now. Try again in an hour.")],
     "signup": [(False, 20, 60 * MINUTE, "Too many new accounts right now. Try again in an hour.")],
@@ -156,6 +162,30 @@ doc_chunks = Table(
     Column("content", Text, nullable=False),
     Column("search", TSVECTOR, Computed("to_tsvector('english', content)", persisted=True)),
     Index("doc_chunks_search", "search", postgresql_using="gin"),
+)
+
+memories = Table(
+    "memories",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("content", Text, nullable=False),
+    Column("created", Float, nullable=False),
+)
+pins = Table(
+    "pins",
+    metadata,
+    Column("conversation_id", String(32), ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True),
+)
+# A share is a snapshot, so later messages in the chat never appear on the public page
+shares = Table(
+    "shares",
+    metadata,
+    Column("token_hash", String(64), primary_key=True),
+    Column("conversation_id", String(32), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, unique=True),
+    Column("title", Text, nullable=False),
+    Column("snapshot", Text, nullable=False),
+    Column("created", Float, nullable=False),
 )
 
 
@@ -391,15 +421,113 @@ def create_conversation(user_id, mode, title):
     return conversation_id
 
 
-def list_conversations(user_id, mode, limit=30):
+def list_conversations(user_id, mode, limit=50):
+    """Pinned chats come first, then the most recently used."""
+    pinned = pins.c.conversation_id.isnot(None)
     with engine().connect() as db:
         rows = db.execute(
-            select(conversations.c.id, conversations.c.title, conversations.c.updated)
+            select(conversations.c.id, conversations.c.title, conversations.c.updated, pinned.label("pinned"))
+            .select_from(conversations.outerjoin(pins, pins.c.conversation_id == conversations.c.id))
             .where(conversations.c.user_id == user_id, conversations.c.mode == mode)
-            .order_by(conversations.c.updated.desc())
+            .order_by(pinned.desc(), conversations.c.updated.desc())
             .limit(limit)
         ).mappings().all()
     return [dict(row) for row in rows]
+
+
+def update_conversation(user_id, conversation_id, title=None, pinned=None):
+    """Renames or pins a chat the user owns. Returns False if it isn't theirs."""
+    if not conversation_exists(user_id, conversation_id):
+        return False
+    with engine().begin() as db:
+        if title is not None:
+            db.execute(update(conversations).where(conversations.c.id == conversation_id).values(title=title))
+        if pinned is not None:
+            db.execute(delete(pins).where(pins.c.conversation_id == conversation_id))
+            if pinned:
+                db.execute(insert(pins).values(conversation_id=conversation_id))
+    return True
+
+
+def truncate_messages(user_id, conversation_id, keep):
+    """Deletes every message after the first `keep`, for editing and regenerating. Returns False if not theirs."""
+    if not conversation_exists(user_id, conversation_id):
+        return False
+    kept = select(messages.c.id).where(messages.c.conversation_id == conversation_id).order_by(messages.c.id).limit(keep)
+    with engine().begin() as db:
+        db.execute(
+            delete(messages).where(messages.c.conversation_id == conversation_id, messages.c.id.not_in(kept.scalar_subquery()))
+        )
+    return True
+
+
+def list_memories(user_id):
+    with engine().connect() as db:
+        rows = db.execute(
+            select(memories.c.id, memories.c.content).where(memories.c.user_id == user_id).order_by(memories.c.id)
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def add_memory(user_id, content):
+    """Saves a fact about the user. Returns False if it's empty, a repeat, or the list is full."""
+    content = " ".join(content.split())[:MAX_MEMORY_CHARS]
+    existing = [memory["content"].lower() for memory in list_memories(user_id)]
+    if not content or content.lower() in existing or len(existing) >= MAX_MEMORIES:
+        return False
+    with engine().begin() as db:
+        db.execute(insert(memories).values(user_id=user_id, content=content, created=time.time()))
+    return True
+
+
+def delete_memory(user_id, memory_id=None):
+    """Deletes one memory, or all of them when memory_id is None."""
+    query = delete(memories).where(memories.c.user_id == user_id)
+    if memory_id is not None:
+        query = query.where(memories.c.id == memory_id)
+    with engine().begin() as db:
+        db.execute(query)
+
+
+def share_conversation(user_id, conversation_id):
+    """Returns a new public token for a snapshot of the chat, replacing any older link. None if not theirs."""
+    if not conversation_exists(user_id, conversation_id):
+        return None
+    with engine().connect() as db:
+        title = db.execute(select(conversations.c.title).where(conversations.c.id == conversation_id)).scalar_one()
+    snapshot = [
+        {"role": m["role"], "content": m["content"], "sources": m["sources"]}
+        for m in load_messages(user_id, conversation_id)
+        if not m["error"]
+    ]
+    token = secrets.token_urlsafe(16)
+    with engine().begin() as db:
+        db.execute(delete(shares).where(shares.c.conversation_id == conversation_id))
+        db.execute(
+            insert(shares).values(
+                token_hash=_token_hash(token),
+                conversation_id=conversation_id,
+                title=title,
+                snapshot=json.dumps(snapshot),
+                created=time.time(),
+            )
+        )
+    return token
+
+
+def unshare_conversation(user_id, conversation_id):
+    if conversation_exists(user_id, conversation_id):
+        with engine().begin() as db:
+            db.execute(delete(shares).where(shares.c.conversation_id == conversation_id))
+
+
+def get_share(token):
+    """Returns the public snapshot for a share link, or None. It never says who shared it."""
+    with engine().connect() as db:
+        row = db.execute(
+            select(shares.c.title, shares.c.snapshot, shares.c.created).where(shares.c.token_hash == _token_hash(token))
+        ).first()
+    return {"title": row[0], "messages": json.loads(row[1]), "created": row[2]} if row else None
 
 
 def conversation_exists(user_id, conversation_id):
@@ -464,7 +592,8 @@ def export_user_data(user_id):
             select(conversations.c.id, conversations.c.mode, conversations.c.title).where(conversations.c.user_id == user_id)
         ).all()
     chats = [{"mode": mode, "title": title, "messages": load_messages(user_id, chat)} for chat, mode, title in rows]
-    return {"username": username, "setup": identity, "documents": doc_names, "chats": chats}
+    saved = [memory["content"] for memory in list_memories(user_id)]
+    return {"username": username, "setup": identity, "documents": doc_names, "memories": saved, "chats": chats}
 
 
 def delete_account(user_id, password):

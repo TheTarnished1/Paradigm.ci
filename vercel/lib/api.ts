@@ -24,15 +24,33 @@ export type Message = {
   content: string;
   sources: Source[];
   error: boolean;
+  /** Suggested next questions, only for replies written in this visit */
+  followups?: string[];
+  /** Shown here but never saved, like a reply that was stopped part way */
+  local?: boolean;
 };
 
-export type ChatSummary = { id: string; title: string; updated: number };
+export type ChatSummary = { id: string; title: string; updated: number; pinned: boolean };
+
+export type Memory = { id: number; content: string };
+
+export type ChatRequest = {
+  message: string;
+  mode: Mode;
+  conversation_id: string | null;
+  model: string | null;
+  /** Editing or regenerating keeps this many saved messages and replaces the rest */
+  keep?: number;
+  research?: boolean;
+  temporary?: boolean;
+  history?: { role: Message["role"]; content: string }[];
+};
 
 export type ChatEvent =
   | { type: "conversation"; id: string }
   | { type: "text"; text: string }
   | { type: "status"; text: string }
-  | { type: "done"; sources: Source[] }
+  | { type: "done"; sources: Source[]; followups?: string[] }
   | { type: "error"; text: string };
 
 export class ApiError extends Error {
@@ -76,7 +94,7 @@ export async function uploadDocuments(files: File[]): Promise<{ documents: strin
 
 /** Sends a message and calls onEvent for each piece of the reply as it arrives. */
 export async function sendChat(
-  body: { message: string; mode: Mode; conversation_id: string | null; model: string | null },
+  body: ChatRequest,
   onEvent: (event: ChatEvent) => void,
   signal?: AbortSignal,
 ) {
